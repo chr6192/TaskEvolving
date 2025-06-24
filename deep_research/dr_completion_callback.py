@@ -40,7 +40,7 @@ from verl.workers.rollout.chat_scheduler import CompletionCallback
 logger = logging.getLogger(__file__)
 
 
-class CustomCompletionCallback(CompletionCallback):
+class DrCompletionCallback(CompletionCallback):
     def __init__(self, config: DictConfig, scheduler: "ChatCompletionScheduler"):
         super().__init__(config, scheduler)
 
@@ -146,7 +146,7 @@ class CustomCompletionCallback(CompletionCallback):
         )
 
         num_turns = np.array([len(conversation) for conversation in batch_conversations], dtype=np.int32)
-        return DataProto(batch=batch, non_tensor_batch={"__num_turns__": num_turns})
+        return DataProto(batch=batch, non_tensor_batch={"__num_turns__": num_turns, "messages": batch_conversations})
 
     def _mask_out_tools_calling_tokens(
         self,

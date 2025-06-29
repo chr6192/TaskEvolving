@@ -16,14 +16,15 @@ PATH_TO_PROJ=$(pwd)
 PATH_TO_VERL="${PATH_TO_PROJ}/verl"
 PATH_TO_DR="${PATH_TO_PROJ}/deep_research"
 
-TRAIN_DATA="${PATH_TO_DR}/data/train_250626.parquet"
-EVAL_DATA="${PATH_TO_DR}/data/test_250626.parquet"
+TRAIN_DATA="${PATH_TO_DR}/data/train_250624.parquet"
+EVAL_DATA="${PATH_TO_DR}/data/test_250624.parquet"
 
 CONFIG_PATH="$PATH_TO_PROJ/deep_research/config"
 TOOL_CONFIG_PATH="${PATH_TO_DR}/config/tool_config/dr_tool_config.yaml"
 
 # RL_DATASET="${PATH_TO_DR}/dataset/custom_rl_dataset.py"
-REWARD_FUN="${PATH_TO_DR}/reward/dr_reward_function.py"
+# REWARD_FUN="${PATH_TO_DR}/reward/dr_reward_function.py"
+REWARD_FUN="${PATH_TO_DR}/reward/mock_reward_function.py"
 
 COMPLETION_CALLBACK="deep_research.dr_completion_callback.DrCompletionCallback"
 # CHAT_SCHEDULER="${PATH_TO_DR}/dr_chat_scheduler.py"

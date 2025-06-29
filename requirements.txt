@@ -2,3 +2,4 @@ mcp
 layotto
 rserving_client
 loguru
+tensorboard

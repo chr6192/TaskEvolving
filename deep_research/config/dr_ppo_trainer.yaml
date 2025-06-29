@@ -8,12 +8,7 @@ defaults:
 
 # 自定义trainer配置
 trainer:
-  # 自定义trainer类配置
-  custom_cls:
-    # 自定义trainer类文件路径
-    path: "deep_research/dr_ray_trainer.py"
-    # 自定义trainer类名称
-    name: "DrRayPPOTrainer"
+  custom_class_path: "deep_research.dr_ray_trainer.DrRayPPOTrainer"
 
 reward_model:
   reward_kwargs:

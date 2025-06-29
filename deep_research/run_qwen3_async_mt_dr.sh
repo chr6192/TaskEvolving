@@ -4,7 +4,8 @@ export VLLM_USE_V1=1
 
 ulimit -n 65535
 
-ray start --head --node-ip-address 127.0.0.1 --num-gpus 2
+GPUS=2
+ray start --head --node-ip-address 127.0.0.1 --num-gpus $GPUS
 
 TASK_NAME="deep_research"
 MODEL_NAME="Qwen3-0.6B"
@@ -93,7 +94,7 @@ ray job submit --address="http://127.0.0.1:8265" \
     trainer.project_name="$TASK_NAME" \
     trainer.experiment_name="$MODEL_NAME-$CURRENT_DATE-n$ROLLOUT_N" \
     trainer.val_before_train=True \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node=$GPUS \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=1 \

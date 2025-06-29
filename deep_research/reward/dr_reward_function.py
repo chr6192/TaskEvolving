@@ -72,10 +72,10 @@ def extract_first_user_contents(group_messages: List[List[Dict[str, str]]]) -> L
                 break
         first_user_contents.append(first_user_content)
     return first_user_contents
-
+    
 
 # group_messages: List[List[Dict[str, str]]]，输入是对话历史
-def compute_score(prompt: str, group_responses: list[str], group_group_messages: list[list[dict]], group_extras=None, use_group_reward=False, return_details=False, return_statistics=True, **kwargs):
+def compute_score(prompt: str, group_responses: list[str], group_messages: list[list[dict]], group_extras=None, use_group_reward=False, return_details=False, return_statistics=True, **kwargs):
     # step1: 提取问题、工具调用、模型输出
     """
     prompt_contents: List[str]，模型第一轮输入，生成 prompt + query
@@ -95,39 +95,39 @@ def compute_score(prompt: str, group_responses: list[str], group_group_messages:
     map_format_func = MapFormat()
 
     # 基于工具调用的返回内容、模型生成的内容打分
-    faithful_reward = map_faithful_func(supply_contents, assistant_contents)
+    faithful_reward = map_faithful_func(assistant_contents, supply_contents)
 
-    # 输入处理：1. 当前问题 2. 当前时间
-    express_reward = map_peek_func(prompt_contents, assistant_contents)
+    # 输入处理：1. 当前问题 2. 当前时间   
+    express_reward = map_peek_func(assistant_contents, prompt_contents)
 
-    # 基于生成的思考长度打分
+    # 基于生成的思考长度打分，参数是思考长度上限
     think_length_threshold = [4096 for _ in range(len(assistant_contents))]
     think_length_reward = think_length_func(assistant_contents, think_length_threshold)
 
-    # 基于最终答案长度打分
+    # 基于最终答案长度打分，参数是答案长度下限
     answer_length_threshold = [1000 for _ in range(len(assistant_contents))]
     answer_length_reward = answer_length_func(assistant_contents, answer_length_threshold)
 
     # 基于供给内容，和最终答案打分
-    faithful_num_exist_reward = number_filter_func(supply_contents, assistant_contents)
+    faithful_num_exist_reward = number_filter_func(assistant_contents, supply_contents)
 
     # 基于供给内容，和最终答案打分
-    map_format_reward = map_format_func(supply_contents, assistant_contents)
+    map_format_reward = map_format_func(assistant_contents, supply_contents)
 
     # step3: 加权计算分数
     total_score = (torch.tensor(faithful_reward) + torch.tensor(express_reward) + torch.tensor(
         think_length_reward) + torch.tensor(answer_length_reward) +
                    torch.tensor(faithful_num_exist_reward) + torch.tensor(map_format_reward))
     total_score = total_score.tolist()
-
+    
     # 暂时不使用
     # personalization_func = personalizationRM()
     # card_reward_func = cardRM_Qwen()
     # # TODO: 输入处理：1. 当前问题 2. 卡片供给内容
-    # card_reward = card_reward_func(supply_contents, assistant_contents)
+    # card_reward = card_reward_func(assistant_contents, supply_contents)
 
     # # TODO: 输入内容：1. 历史对话 2. 思考内容与 answer 3. 用户画像 user_profile 字段 4. 问题
-    # personlization_reward = personalization_func(supply_contents, assistant_contents)
+    # personlization_reward = personalization_func(assistant_contents, supply_contents)
 
     # step4: 记录每项分数
     reward_info = {

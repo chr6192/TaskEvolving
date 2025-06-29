@@ -6,6 +6,23 @@ defaults:
   - ppo_trainer
   - _self_
 
+# 自定义trainer配置
+trainer:
+  # 自定义trainer类配置
+  custom_cls:
+    # 自定义trainer类文件路径
+    path: "deep_research/dr_ray_trainer.py"
+    # 自定义trainer类名称
+    name: "DrRayPPOTrainer"
+
 reward_model:
   reward_kwargs:
     reward_manager_class_path: "deep_research.reward.antfin_reward_manager.AntfinRewardManager"
+
+actor_rollout_ref:
+  rollout:
+    multi_turn:
+      chat_scheduler_class_name: "deep_research.dr_chat_scheduler.DrChatCompletionScheduler"
+      chat_scheduler_kwargs:
+        max_retries: 3
+      # async_server_class_name: "deep_research.dr_vllm_async_server.DrAsyncvLLMServer"

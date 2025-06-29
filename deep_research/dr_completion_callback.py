@@ -1,16 +1,3 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 import asyncio
 import heapq
 import importlib
@@ -48,7 +35,6 @@ class DrCompletionCallback(CompletionCallback):
 
     async def __call__(self, messages: List[Dict[str, str]], completions: ChatCompletion, info: Dict[str, Any]):
         message = completions.choices[0].message.model_dump(exclude_unset=True, exclude_none=True)
-        print(f"message: {message}")
         if "content" not in message:
             message["content"] = ""
         messages.append(message)
@@ -56,12 +42,12 @@ class DrCompletionCallback(CompletionCallback):
 
         # STEP 0: check if we reach max turns
         if self.max_turns and len(messages) >= self.max_turns:
-            print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] Reach max turns, done!")
+            print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] Reach max turns, done!\n{message}")
             return
 
         # STEP 1: check if the model called tools
         if finish_reason != "tool_calls":
-            print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] No tool called, done!")
+            print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] No tool called, done!\n{message}")
             return
 
         # STEP 2: call tools
@@ -76,7 +62,7 @@ class DrCompletionCallback(CompletionCallback):
             return
         messages.extend(tool_responses)
 
-        print(f"message: {message}, turn={len(messages)}, tool_calls: {tool_calls}, tool_responses: {tool_responses}")
+        print(f"[id={completions.id},turn={len(messages)}, tool_calls: {tool_calls}, tool_responses: {tool_responses}]\nmessage: {message}")
 
         # STEP 3: resubmit completion request with tool responses
         self.scheduler.submit_chat_completions(messages=messages, request_id=completions.id, info=info)
@@ -126,6 +112,59 @@ class DrCompletionCallback(CompletionCallback):
             prompts["input_ids"] = prompts["input_ids"].repeat_interleave(n, dim=0)
             prompts["attention_mask"] = prompts["attention_mask"].repeat_interleave(n, dim=0)
 
+        # 获取最大token长度限制
+        max_token_len = self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu
+        
+        # 检查并截断超长的sequences - 需要真正截断tensor长度
+        truncated_indices = []
+        for i in range(prompts["input_ids"].size(0)):
+            prompt_len = prompts["attention_mask"][i].sum().item()
+            response_len = responses["attention_mask"][i].sum().item()
+            total_len = prompt_len + response_len
+            
+            if total_len > max_token_len:
+                # 计算需要截断的长度
+                max_response_len = max_token_len - prompt_len
+                if max_response_len <= 0:
+                    # 如果prompt本身就超长，将response截断为1个token（通常是EOS）
+                    max_response_len = 1
+                
+                truncated_indices.append((i, max_response_len))
+                print(f"需要截断样本 {i}: 原始长度 {total_len} -> 截断后长度 {prompt_len + max_response_len}")
+        
+        # 如果有需要截断的样本，重新构造responses tensor
+        if truncated_indices:
+            # 计算新的最大response长度
+            max_response_len_after_truncation = max_token_len - prompts["input_ids"].size(1)
+            if max_response_len_after_truncation <= 0:
+                max_response_len_after_truncation = 1
+            
+            # 如果当前response长度超过截断后的最大长度，需要缩小tensor
+            if responses["input_ids"].size(1) > max_response_len_after_truncation:
+                pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                
+                # 创建新的截断后的responses tensor
+                new_responses_input_ids = responses["input_ids"][:, :max_response_len_after_truncation].clone()
+                new_responses_attention_mask = responses["attention_mask"][:, :max_response_len_after_truncation].clone()
+                
+                # 对需要截断的样本进行处理
+                for i, max_resp_len in truncated_indices:
+                    if max_resp_len < max_response_len_after_truncation:
+                        # 截断并padding
+                        new_responses_input_ids[i, max_resp_len:] = pad_token_id
+                        new_responses_attention_mask[i, max_resp_len:] = 0
+                
+                responses["input_ids"] = new_responses_input_ids
+                responses["attention_mask"] = new_responses_attention_mask
+                
+                print(f"截断responses tensor: {responses['input_ids'].size(1)} -> {max_response_len_after_truncation}")
+            else:
+                # 不需要缩小tensor，只需要修改需要截断的样本
+                pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                for i, max_resp_len in truncated_indices:
+                    responses["input_ids"][i, max_resp_len:] = pad_token_id
+                    responses["attention_mask"][i, max_resp_len:] = 0
+
         # response_mask: response mask with tools calling masked out
         response_mask = self._mask_out_tools_calling_tokens(batch.non_tensor_batch["raw_prompt"].repeat(n, axis=0), batch_conversations, responses["input_ids"], responses["attention_mask"])
 
@@ -133,11 +172,18 @@ class DrCompletionCallback(CompletionCallback):
         attention_mask = torch.cat([prompts["attention_mask"], responses["attention_mask"]], dim=1)
         position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
 
+        # 构造与attention_mask长度一致的loss_mask
+        # prompt部分设为0，response部分使用response_mask
+        loss_mask = torch.zeros_like(attention_mask)
+        prompt_length = prompts["input_ids"].size(1)
+        loss_mask[:, prompt_length:] = response_mask
+
         batch = TensorDict(
             {
                 "prompts": prompts["input_ids"],  # [bsz, prompt_length]
                 "responses": responses["input_ids"],  # [bsz, response_length]
                 "response_mask": response_mask,  # [bsz, response_length]
+                "loss_mask": loss_mask,  # [bsz, prompt_length + response_length]
                 "input_ids": input_ids,  # [bsz, prompt_length + response_length]
                 "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
                 "position_ids": position_ids,  # [bsz, prompt_length + response_length]
@@ -146,7 +192,8 @@ class DrCompletionCallback(CompletionCallback):
         )
 
         num_turns = np.array([len(conversation) for conversation in batch_conversations], dtype=np.int32)
-        return DataProto(batch=batch, non_tensor_batch={"__num_turns__": num_turns, "messages": batch_conversations})
+        messages = np.array(batch_conversations, dtype=object)
+        return DataProto(batch=batch, non_tensor_batch={"__num_turns__": num_turns, "messages": messages})
 
     def _mask_out_tools_calling_tokens(
         self,
@@ -189,8 +236,14 @@ class DrCompletionCallback(CompletionCallback):
 
             roles = deduplicate_adjacent_tool_calls([response["role"] for response in responses])
             # Each turn should be: [BOS]...[EOS]
-            eos_indices = input_ids[i].eq(self.tokenizer.eos_token_id).nonzero().squeeze(1)[: len(roles)]
-            for j in range(len(roles)):
+            eos_indices = input_ids[i].eq(self.tokenizer.eos_token_id).nonzero().squeeze(1)
+            
+            # 防止因截断导致的索引越界：只处理实际存在的EOS tokens
+            max_roles = min(len(roles), len(eos_indices))
+            if max_roles < len(roles):
+                print(f"警告: 样本 {i} 因截断缺少 {len(roles) - max_roles} 个EOS token，只处理前 {max_roles} 个roles")
+            
+            for j in range(max_roles):
                 if roles[j] == "tool":
                     bos = eos_indices[j - 1] + 1 if j > 0 else 0
                     eos = eos_indices[j]

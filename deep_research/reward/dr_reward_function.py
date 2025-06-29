@@ -21,26 +21,26 @@ from atomic_eval.simple_eval import SimpleEvaluator
 
 INVALID_REWARD = -0.01
 
-def extract_assistant_messages(messages: List[List[Dict[str, str]]]) -> List[str]:
+def extract_assistant_group_messages(group_messages: List[List[Dict[str, str]]]) -> List[str]:
     result = []
-    for conversation in messages:
+    for conversation in group_messages:
         # 提取当前对话中所有助手消息的内容
         assistant_contents = [
-            msg["content"] 
-            for msg in conversation 
+            msg["content"]
+            for msg in conversation
             if msg.get("role") == "assistant"
         ]
         # 用两个换行符拼接内容并添加到结果列表
         result.append("\n\n".join(assistant_contents))
     return result
 
-def extract_tool_calls(messages: List[List[Dict[str, str]]]) -> List[str]:
+def extract_tool_calls(group_messages: List[List[Dict[str, str]]]) -> List[str]:
     result = []
-    for conversation in messages:
+    for conversation in group_messages:
         # 提取当前对话中所有工具调用的内容
         tool_calls = [
-            msg["content"] 
-            for msg in conversation 
+            msg["content"]
+            for msg in conversation
             if msg.get("role") == "tool"
         ]
         # 用两个换行符拼接内容并添加到结果列表
@@ -48,9 +48,9 @@ def extract_tool_calls(messages: List[List[Dict[str, str]]]) -> List[str]:
     return result
 
 # 从所有子对话提取最后一轮输出内容
-def extract_last_assistant_contents(messages: List[List[Dict[str, str]]]) -> List[str]:
+def extract_last_assistant_contents(group_messages: List[List[Dict[str, str]]]) -> List[str]:
     last_response_list = []
-    for conversation in messages:
+    for conversation in group_messages:
         last_assistant_content = None
         # 反向遍历对话以找到最后一个助手消息
         for message in reversed(conversation):
@@ -61,9 +61,9 @@ def extract_last_assistant_contents(messages: List[List[Dict[str, str]]]) -> Lis
     return last_response_list
 
 # 从所有子对话中提取第一轮 user 输入，包含问题
-def extract_first_user_contents(messages: List[List[Dict[str, str]]]) -> List[str]:
+def extract_first_user_contents(group_messages: List[List[Dict[str, str]]]) -> List[str]:
     first_user_contents = []
-    for conversation in messages:
+    for conversation in group_messages:
         first_user_content = None
         # 遍历对话以找到第一个用户消息
         for message in conversation:
@@ -72,19 +72,19 @@ def extract_first_user_contents(messages: List[List[Dict[str, str]]]) -> List[st
                 break
         first_user_contents.append(first_user_content)
     return first_user_contents
-    
 
-# messages: List[List[Dict[str, str]]]，输入是对话历史
-def compute_score(messages: List[List[Dict[str, str]]], extras=None, **kwargs):
+
+# group_messages: List[List[Dict[str, str]]]，输入是对话历史
+def compute_score(prompt: str, group_responses: list[str], group_group_messages: list[list[dict]], group_extras=None, use_group_reward=False, return_details=False, return_statistics=True, **kwargs):
     # step1: 提取问题、工具调用、模型输出
     """
     prompt_contents: List[str]，模型第一轮输入，生成 prompt + query
     supply_contents: List[str]，工具调用内容列表
     assistant_contents: List[str]，模型输出内容列表
     """
-    prompt_contents = extract_first_user_contents(messages)
-    supply_contents = extract_tool_calls(messages)
-    assistant_contents = extract_assistant_messages(messages)
+    prompt_contents = extract_first_user_contents(group_messages)
+    supply_contents = extract_tool_calls(group_messages)
+    assistant_contents = extract_assistant_group_messages(group_messages)
 
     # step2: 分不同维度计算分数
     map_faithful_func = Map_faithful_model_based_openai()
@@ -93,11 +93,11 @@ def compute_score(messages: List[List[Dict[str, str]]], extras=None, **kwargs):
     answer_length_func = LengthRM()
     number_filter_func = Map_faithful_rule_based_num_filter()
     map_format_func = MapFormat()
-    
+
     # 基于工具调用的返回内容、模型生成的内容打分
     faithful_reward = map_faithful_func(supply_contents, assistant_contents)
 
-    # 输入处理：1. 当前问题 2. 当前时间   
+    # 输入处理：1. 当前问题 2. 当前时间
     express_reward = map_peek_func(prompt_contents, assistant_contents)
 
     # 基于生成的思考长度打分
@@ -115,10 +115,11 @@ def compute_score(messages: List[List[Dict[str, str]]], extras=None, **kwargs):
     map_format_reward = map_format_func(supply_contents, assistant_contents)
 
     # step3: 加权计算分数
-    total_score = (torch.tensor(faithful_reward) + torch.tensor(express_reward) + torch.tensor(think_length_reward) + torch.tensor(answer_length_reward) +
+    total_score = (torch.tensor(faithful_reward) + torch.tensor(express_reward) + torch.tensor(
+        think_length_reward) + torch.tensor(answer_length_reward) +
                    torch.tensor(faithful_num_exist_reward) + torch.tensor(map_format_reward))
     total_score = total_score.tolist()
-    
+
     # 暂时不使用
     # personalization_func = personalizationRM()
     # card_reward_func = cardRM_Qwen()

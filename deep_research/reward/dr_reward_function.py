@@ -118,7 +118,7 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     # total_score = (torch.tensor(faithful_reward) + torch.tensor(express_reward) + torch.tensor(
     #     think_length_reward) + torch.tensor(answer_length_reward) +
     #                torch.tensor(faithful_num_exist_reward) + torch.tensor(map_format_reward))
-    total_score = (torch.tensor(faithful_reward) + torch.tensor(faithful_num_exist_reward) + torch.tensor(map_format_reward))
+    total_score = (0.6 * torch.tensor(faithful_reward) + 0.2 * torch.tensor(faithful_num_exist_reward) + 0.2 * torch.tensor(map_format_reward))
     total_score = total_score.tolist()
     
     # 暂时不使用

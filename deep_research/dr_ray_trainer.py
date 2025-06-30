@@ -398,6 +398,19 @@ class DrRayPPOTrainer(RayPPOTrainer):
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            
+                            # Convert reward_extra_infos_dict to metrics using reduce_metrics logic
+                            reward_metrics = {}
+                            for key, val_list in reward_extra_infos_dict.items():
+                                if isinstance(val_list, list) and len(val_list) > 0:
+                                    # Add prefix to distinguish reward metrics
+                                    metric_key = f"reward/{key}"
+                                    reward_metrics[metric_key] = val_list
+                            
+                            # Reduce the metrics and update main metrics dict
+                            if reward_metrics:
+                                reduced_reward_metrics = reduce_metrics(reward_metrics)
+                                metrics.update(reduced_reward_metrics)
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:

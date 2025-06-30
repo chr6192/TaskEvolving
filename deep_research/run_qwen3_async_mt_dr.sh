@@ -9,7 +9,7 @@ ray start --head --node-ip-address 127.0.0.1 --num-gpus $GPUS
 
 TASK_NAME="deep_research"
 MODEL_NAME="Qwen3-0.6B"
-CURRENT_DATE=$(date +"%Y%m%d")
+CURRENT_DATE=$(date +"%Y%m%d-%H%M%S")
 ROLLOUT_N=2
 
 PATH_TO_PROJ=$(pwd)

@@ -112,13 +112,13 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     faithful_num_exist_reward = number_filter_func(assistant_contents, supply_contents)
 
     # 基于供给内容，和最终答案打分
-    # map_format_reward = map_format_func(assistant_contents, supply_contents)
+    map_format_reward = map_format_func(assistant_contents, supply_contents)
 
     # step3: 加权计算分数
     # total_score = (torch.tensor(faithful_reward) + torch.tensor(express_reward) + torch.tensor(
     #     think_length_reward) + torch.tensor(answer_length_reward) +
     #                torch.tensor(faithful_num_exist_reward) + torch.tensor(map_format_reward))
-    total_score = torch.tensor(faithful_reward) + torch.tensor(faithful_num_exist_reward)
+    total_score = (torch.tensor(faithful_reward) + torch.tensor(faithful_num_exist_reward) + torch.tensor(map_format_reward))
     total_score = total_score.tolist()
     
     # 暂时不使用
@@ -137,7 +137,7 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
         # "think_length_reward": think_length_reward,
         # "answer_length_reward": answer_length_reward,
         "faithful_num_exist_reward": faithful_num_exist_reward,
-        # "map_format_reward": map_format_reward,
+        "map_format_reward": map_format_reward,
     }
 
     return total_score, reward_info

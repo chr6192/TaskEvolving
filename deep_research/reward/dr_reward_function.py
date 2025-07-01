@@ -10,8 +10,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from filelock import FileLock
 from meta_info.rewards.card_reward import cardRM_Qwen
-from meta_info.rewards.express_reward import Map_peek_based_openai, AsyncMapPeekBasedOpenai
-from meta_info.rewards.faithful_reward import Map_faithful_model_based_openai, AsyncMapFaithfulModelBasedOpenai
+from meta_info.rewards.express_reward import (AsyncMapPeekBasedOpenai,
+                                               Map_peek_based_openai)
+from meta_info.rewards.faithful_reward import (
+    AsyncMapFaithfulModelBasedOpenai, Map_faithful_model_based_openai)
 from meta_info.rewards.finance_personalization import personalizationRM
 from meta_info.rewards.finance_rule import (LengthRM,
                                             Map_faithful_rule_based_num_filter,
@@ -76,12 +78,20 @@ def extract_first_user_contents(group_messages: List[List[Dict[str, str]]]) -> L
 
 # group_messages: List[List[Dict[str, str]]]，输入是对话历史
 def compute_score(prompt: str, group_responses: list[str], group_messages: list[list[dict]], group_extras=None, use_group_reward=False, return_details=False, return_statistics=True, **kwargs):
+    """
+    输入：
+        - prompt: str，当前问题
+        - group_responses: List[str]，每个子对话的模型输出
+        - group_messages: List[List[Dict[str, str]]]，每个子对话的消息列表
+    输出：
+        - total_score: List[float]，每个子对话的总分
+        - reward_info: Dict[str, List[float]]，包含各个维度的分数
+        - reward_details: List[Dict[str, Any]]，每个子对话的详细分数信息
+    """
     # step1: 提取问题、工具调用、模型输出
-    """
-    prompt_contents: List[str]，模型第一轮输入，生成 prompt + query
-    supply_contents: List[str]，工具调用内容列表
-    assistant_contents: List[str]，模型输出内容列表
-    """
+    # prompt_contents: List[str]，模型第一轮输入，生成 prompt + query
+    # supply_contents: List[str]，工具调用内容列表
+    # assistant_contents: List[str]，模型输出内容列表
     prompt_contents = extract_first_user_contents(group_messages)
     supply_contents = extract_tool_calls(group_messages)
     assistant_contents = extract_assistant_group_messages(group_messages)
@@ -96,9 +106,12 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     number_filter_func = Map_faithful_rule_based_num_filter()
     map_format_func = MapFormat()
 
+    # timing and compute rewards
+    timings: Dict[str, float] = {}
+
     # 基于工具调用的返回内容、模型生成的内容打分
     # faithful_reward = map_faithful_func(assistant_contents, supply_contents)
-    faithful_reward = async_map_faithful_func(assistant_contents, supply_contents)
+    faithful_reward, faithful_details = async_map_faithful_func(assistant_contents, supply_contents)
     # 输入处理：1. 当前问题 2. 当前时间   
     # express_reward = map_peek_func(assistant_contents, prompt_contents)
     express_reward = async_map_peek_func(assistant_contents, prompt_contents)
@@ -125,17 +138,22 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     total_score = (0.4 * torch.tensor(faithful_reward) + 0.4 * torch.tensor(express_reward) + 0.1 * torch.tensor(faithful_num_exist_reward) + 0.1 * torch.tensor(map_format_reward))
 
     total_score = total_score.tolist()
-    
+
     # 暂时不使用
     # personalization_func = personalizationRM()
     # card_reward_func = cardRM_Qwen()
-    # # TODO: 输入处理：1. 当前问题 2. 卡片供给内容
-    # card_reward = card_reward_func(assistant_contents, supply_contents)
+    # # # TODO: 输入处理：1. 当前问题 2. 卡片供给内容
+    # start = time.perf_counter()
+    # card_reward = card_reward_func(supply_contents, assistant_contents)
+    # timings['card_reward_time'] = round(time.perf_counter() - start, 4)
 
     # # TODO: 输入内容：1. 历史对话 2. 思考内容与 answer 3. 用户画像 user_profile 字段 4. 问题
-    # personlization_reward = personalization_func(assistant_contents, supply_contents)
+    # start = time.perf_counter()
+    # personlization_reward = personalization_func(supply_contents, assistant_contents)
+    # timings['personalization_reward_time'] = time.perf_counter() - start
 
-    # step4: 记录每项分数
+    # print(f"timings: {timings}")
+    # compile reward details
     reward_info = {
         "faithful_reward": faithful_reward,
         "express_reward": express_reward,
@@ -144,5 +162,15 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
         "faithful_num_exist_reward": faithful_num_exist_reward,
         "map_format_reward": map_format_reward,
     }
+    
+    reward_details = []
 
-    return total_score, reward_info
+    # 遍历 faithful_details 的字段，去除以 "tmp" 结尾的键
+    for detail in faithful_details:
+        filtered_detail = {key: value for key, value in detail.items() if not key.endswith("tmp")}
+        reward_details.append(filtered_detail)
+
+    if return_details:
+        return total_score, reward_info, reward_details
+    else:
+        return total_score, reward_info

@@ -5,7 +5,10 @@ import json
 import os
 import re
 import time
+import asyncio
 from typing import Any, Dict, List, Optional, Tuple, Union
+from functools import wraps
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import torch
 from filelock import FileLock
@@ -76,9 +79,102 @@ def extract_first_user_contents(group_messages: List[List[Dict[str, str]]]) -> L
     return first_user_contents
     
 
+class HybridRewardExecutor:
+    """混合并行执行器，支持异步和同步reward函数的并行执行"""
+    
+    def __init__(self):
+        self.timings = {}
+        self.async_tasks = []
+        self.sync_tasks = []
+    
+    def add_async_reward(self, name: str, func, *args, **kwargs):
+        """添加异步reward任务"""
+        self.async_tasks.append((name, func, args, kwargs))
+    
+    def add_sync_reward(self, name: str, func, *args, **kwargs):
+        """添加同步reward任务"""
+        self.sync_tasks.append((name, func, args, kwargs))
+    
+    async def execute_all_async(self):
+        """异步执行所有任务"""
+        results = {}
+        
+        # 并行执行异步任务
+        if self.async_tasks:
+            async_coroutines = []
+            async_names = []
+            for name, func, args, kwargs in self.async_tasks:
+                async_coroutines.append(self._timed_async_call(name, func, *args, **kwargs))
+                async_names.append(name)
+            
+            # 等待所有异步任务完成
+            async_results = await asyncio.gather(*async_coroutines, return_exceptions=True)
+            for i, name in enumerate(async_names):
+                if isinstance(async_results[i], Exception):
+                    print(f"异步reward {name} 执行出错: {async_results[i]}")
+                    results[name] = ([], []) if name == "faithful_reward" else []
+                else:
+                    results[name] = async_results[i]
+        
+        # 并行执行同步任务（使用线程池）
+        if self.sync_tasks:
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor(max_workers=len(self.sync_tasks)) as executor:
+                sync_futures = []
+                sync_names = []
+                for name, func, args, kwargs in self.sync_tasks:
+                    future = loop.run_in_executor(
+                        executor, 
+                        self._timed_sync_call, 
+                        name, func, *args, **kwargs
+                    )
+                    sync_futures.append(future)
+                    sync_names.append(name)
+                
+                # 等待所有同步任务完成
+                sync_results = await asyncio.gather(*sync_futures, return_exceptions=True)
+                for i, name in enumerate(sync_names):
+                    if isinstance(sync_results[i], Exception):
+                        print(f"同步reward {name} 执行出错: {sync_results[i]}")
+                        results[name] = []
+                    else:
+                        results[name] = sync_results[i]
+        
+        return results
+    
+    def execute_all_sync(self):
+        """同步执行所有任务（使用asyncio.run）"""
+        return asyncio.run(self.execute_all_async())
+    
+    async def _timed_async_call(self, name: str, func, *args, **kwargs):
+        """带计时的异步函数调用"""
+        start_time = time.perf_counter()
+        try:
+            # 使用to_thread在线程中执行，因为__call__方法是同步的但内部有异步机制
+            result = await asyncio.to_thread(func, *args, **kwargs)
+            return result
+        finally:
+            end_time = time.perf_counter()
+            self.timings[f"{name}_time"] = round(end_time - start_time, 4)
+    
+    def _timed_sync_call(self, name: str, func, *args, **kwargs):
+        """带计时的同步函数调用"""
+        start_time = time.perf_counter()
+        try:
+            result = func(*args, **kwargs)
+            return result
+        finally:
+            end_time = time.perf_counter()
+            self.timings[f"{name}_time"] = round(end_time - start_time, 4)
+    
+    def get_timings(self):
+        return self.timings.copy()
+
 # group_messages: List[List[Dict[str, str]]]，输入是对话历史
-def compute_score(prompt: str, group_responses: list[str], group_messages: list[list[dict]], group_extras=None, use_group_reward=False, return_details=False, return_statistics=True, **kwargs):
+async def compute_score_async(prompt: str, group_responses: list[str], group_messages: list[list[dict]], group_extras=None, use_group_reward=False, return_details=False, return_statistics=True, **kwargs):
     """
+    异步版本的compute_score，用于高性能场景和批量处理
+    
     输入：
         - prompt: str，当前问题
         - group_responses: List[str]，每个子对话的模型输出
@@ -105,17 +201,23 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     # answer_length_func = LengthRM()
     number_filter_func = Map_faithful_rule_based_num_filter()
     map_format_func = MapFormat()
-
-    # timing and compute rewards
-    timings: Dict[str, float] = {}
-
+    
+    executor = HybridRewardExecutor()
+    
+    # step3: 注册reward任务
+    # 异步任务
     # 基于工具调用的返回内容、模型生成的内容打分
-    # faithful_reward = map_faithful_func(assistant_contents, supply_contents)
-    faithful_reward, faithful_details = async_map_faithful_func(assistant_contents, supply_contents)
-    # 输入处理：1. 当前问题 2. 当前时间   
-    # express_reward = map_peek_func(assistant_contents, prompt_contents)
-    express_reward = async_map_peek_func(assistant_contents, prompt_contents)
-
+    executor.add_async_reward(
+        "faithful_reward", 
+        async_map_faithful_func, 
+        assistant_contents, supply_contents
+    )
+    executor.add_async_reward(
+        "express_reward",
+        async_map_peek_func,
+        assistant_contents, prompt_contents
+    )
+    
     # 基于生成的思考长度打分，参数是思考长度上限
     # think_length_threshold = [4096 for _ in range(len(assistant_contents))]
     # think_length_reward = think_length_func(assistant_contents, think_length_threshold)
@@ -124,19 +226,35 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
 #     answer_length_threshold = [1000 for _ in range(len(assistant_contents))]
 #     answer_length_reward = answer_length_func(assistant_contents, answer_length_threshold)
 
-    # 基于供给内容，和最终答案打分
-    faithful_num_exist_reward = number_filter_func(assistant_contents, supply_contents)
 
-    # 基于供给内容，和最终答案打分
-    map_format_reward = map_format_func(assistant_contents, supply_contents)
+    # 同步任务
+    executor.add_sync_reward(
+        "faithful_num_exist_reward",
+        number_filter_func,
+        assistant_contents, supply_contents
+    )
+    executor.add_sync_reward(
+        "map_format_reward",
+        map_format_func,
+        assistant_contents, supply_contents
+    )
+    
+    # step4: 并行执行所有任务
+    results = executor.execute_all_sync()
+    timings = executor.get_timings()
+    
+    # step5: 提取结果
+    faithful_reward, faithful_details = results["faithful_reward"]
+    express_reward = results["express_reward"]
+    faithful_num_exist_reward = results["faithful_num_exist_reward"]
+    map_format_reward = results["map_format_reward"]
 
-    # step3: 加权计算分数
     # total_score = (torch.tensor(faithful_reward) + torch.tensor(express_reward) + torch.tensor(
     #     think_length_reward) + torch.tensor(answer_length_reward) +
     #                torch.tensor(faithful_num_exist_reward) + torch.tensor(map_format_reward))
     # total_score = (0.6 * torch.tensor(faithful_reward) + 0.2 * torch.tensor(faithful_num_exist_reward) + 0.2 * torch.tensor(map_format_reward))
-    total_score = (0.4 * torch.tensor(faithful_reward) + 0.4 * torch.tensor(express_reward) + 0.1 * torch.tensor(faithful_num_exist_reward) + 0.1 * torch.tensor(map_format_reward))
-
+    total_score = (0.4 * torch.tensor(faithful_reward) + 0.4 * torch.tensor(express_reward) + 
+                   0.1 * torch.tensor(faithful_num_exist_reward) + 0.1 * torch.tensor(map_format_reward))
     total_score = total_score.tolist()
 
     # 暂时不使用
@@ -152,8 +270,10 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     # personlization_reward = personalization_func(supply_contents, assistant_contents)
     # timings['personalization_reward_time'] = time.perf_counter() - start
 
-    # print(f"timings: {timings}")
-    # compile reward details
+    print(f"混合并行reward计算耗时: {timings}")
+    print(f"异步任务数: {len(executor.async_tasks)}, 同步任务数: {len(executor.sync_tasks)}")
+    print(f"总计算时间: {sum(timings.values()):.4f}秒")
+    
     reward_info = {
         "faithful_reward": faithful_reward,
         "express_reward": express_reward,
@@ -165,12 +285,48 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     
     reward_details = []
 
-    # 遍历 faithful_details 的字段，去除以 "tmp" 结尾的键
-    for detail in faithful_details:
+    # 遍历 faithful_details 的字段，去除以 "tmp" 结尾的键，并添加耗时信息
+    for i, detail in enumerate(faithful_details):
         filtered_detail = {key: value for key, value in detail.items() if not key.endswith("tmp")}
+        # 将耗时信息添加到每个reward_detail中
+        filtered_detail.update(timings)
         reward_details.append(filtered_detail)
+
+    # 如果reward_details为空（比如faithful_details为空），确保至少有耗时信息
+    if not reward_details:
+        reward_details = [timings for _ in range(len(assistant_contents))]
 
     if return_details:
         return total_score, reward_info, reward_details
     else:
         return total_score, reward_info
+
+
+def compute_score(prompt: str, group_responses: list[str], group_messages: list[list[dict]], group_extras=None, use_group_reward=False, return_details=False, return_statistics=True, **kwargs):
+    """
+    同步版本的compute_score，保持向后兼容性
+    
+    这是对 compute_score_async 的同步包装器，适用于：
+    - 现有代码迁移，无需修改调用方式
+    - 单次调用场景
+    - 不需要与其他异步操作并发的场景
+    
+    对于高频调用或批量处理，建议使用 compute_score_async 获得更好的性能。
+    
+    输入：
+        - prompt: str，当前问题
+        - group_responses: List[str]，每个子对话的模型输出
+        - group_messages: List[List[Dict[str, str]]]，每个子对话的消息列表
+    输出：
+        - total_score: List[float]，每个子对话的总分
+        - reward_info: Dict[str, List[float]]，包含各个维度的分数
+        - reward_details: List[Dict[str, Any]]，每个子对话的详细分数信息
+    """
+    return asyncio.run(compute_score_async(
+        prompt, group_responses, group_messages, 
+        group_extras=group_extras, 
+        use_group_reward=use_group_reward, 
+        return_details=return_details, 
+        return_statistics=return_statistics, 
+        **kwargs
+    ))

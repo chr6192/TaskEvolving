@@ -65,7 +65,46 @@ class DrRayPPOTrainer(RayPPOTrainer):
     ):
         super().__init__(config, tokenizer, role_worker_mapping, resource_pool_manager, ray_worker_group_cls, processor, reward_fn, val_reward_fn, train_dataset, val_dataset, collate_fn, train_sampler, device_name)
     
-    def _dump_generations(self, messages, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
+    def _compute_reward_with_details(self, data: DataProto, reward_fn):
+        """
+        自定义的奖励计算方法，支持提取 all_details
+        """
+        try:
+            reward_result = reward_fn(data, return_dict=True)
+            reward_tensor = reward_result["reward_tensor"]
+            reward_extra_infos_dict = reward_result.get("reward_extra_info", {})
+            all_details = reward_result.get("all_details", None)
+        except Exception as e:
+            print(f"Error in reward_fn: {e}")
+            reward_tensor = reward_fn(data)
+            reward_extra_infos_dict = {}
+            all_details = None
+
+        return reward_tensor, reward_extra_infos_dict, all_details
+
+    @staticmethod
+    @ray.remote(num_cpus=1)
+    def _compute_reward_async_with_details(data: DataProto, config, tokenizer):
+        """
+        自定义的异步奖励计算方法，支持提取 all_details
+        """
+        from verl.trainer.ppo.reward import load_reward_manager
+        reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
+        
+        try:
+            reward_result = reward_fn(data, return_dict=True)
+            reward_tensor = reward_result["reward_tensor"]
+            reward_extra_infos_dict = reward_result.get("reward_extra_info", {})
+            all_details = reward_result.get("all_details", None)
+        except Exception as e:
+            print(f"Error in reward_fn: {e}")
+            reward_tensor = reward_fn(data)
+            reward_extra_infos_dict = {}
+            all_details = None
+
+        return reward_tensor, reward_extra_infos_dict, all_details
+    
+    def _dump_generations(self, messages, inputs, outputs, scores, reward_extra_infos_dict, dump_path, all_details=None):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
@@ -83,6 +122,10 @@ class DrRayPPOTrainer(RayPPOTrainer):
             if len(v) == n:
                 base_data[k] = v
 
+        # 添加 all_details 到 base_data 中
+        if all_details is not None and len(all_details) == n:
+            base_data["details"] = all_details
+
         lines = []
         for i in range(n):
             entry = {k: v[i] for k, v in base_data.items()}
@@ -96,6 +139,8 @@ class DrRayPPOTrainer(RayPPOTrainer):
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+        all_details_list = []  # 收集所有的 details
+        all_messages_lengths = []  # 收集所有的 messages 长度
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -161,19 +206,33 @@ class DrRayPPOTrainer(RayPPOTrainer):
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            result = self.val_reward_fn(test_batch, return_dict=True)
-            reward_tensor = result["reward_tensor"]
+            reward_tensor, reward_extra_info, batch_details = self._compute_reward_with_details(test_batch, self.val_reward_fn)
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
+            # 收集 all_details
+            if batch_details:
+                all_details_list.extend(batch_details)
+
             reward_extra_infos_dict["reward"].extend(scores)
             print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
+            if reward_extra_info:
+                for key, lst in reward_extra_info.items():
                     reward_extra_infos_dict[key].extend(lst)
                     print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
+            
+            # 收集 messages 长度统计
+            batch_messages = test_batch.non_tensor_batch.get("messages", [])
+            if batch_messages:
+                # 断言每个messages都是list
+                for i, messages in enumerate(batch_messages):
+                    assert isinstance(messages, list), f"messages[{i}] is not a list, got {type(messages)}"
+                
+                # 计算每个messages的长度并收集
+                batch_messages_lengths = [len(messages) for messages in batch_messages]
+                all_messages_lengths.extend(batch_messages_lengths)
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -187,6 +246,7 @@ class DrRayPPOTrainer(RayPPOTrainer):
                 scores=sample_scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
+                all_details=all_details_list if all_details_list else None,
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
@@ -196,6 +256,18 @@ class DrRayPPOTrainer(RayPPOTrainer):
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
         metric_dict = {}
+        
+        # 添加 messages 长度统计到 metric_dict
+        if all_messages_lengths:
+            messages_lengths_array = np.array(all_messages_lengths)
+            messages_stats = {
+                "val-aux/messages_length_max": int(np.max(messages_lengths_array)),
+                "val-aux/messages_length_min": int(np.min(messages_lengths_array)),
+                "val-aux/messages_length_mean": float(np.mean(messages_lengths_array)),
+                "val-aux/messages_length_median": float(np.median(messages_lengths_array)),
+            }
+            metric_dict.update(messages_stats)
+        
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
             for var_name, metric2val in var2metric2val.items():
@@ -334,9 +406,9 @@ class DrRayPPOTrainer(RayPPOTrainer):
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
+                            future_reward = DrRayPPOTrainer._compute_reward_async_with_details.remote(batch, self.config, self.tokenizer)
                         else:
-                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                            reward_tensor, reward_extra_infos_dict, all_details = self._compute_reward_with_details(batch, self.reward_fn)
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -392,8 +464,9 @@ class DrRayPPOTrainer(RayPPOTrainer):
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
+                        all_details = None  # 初始化 all_details
                         if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                            reward_tensor, reward_extra_infos_dict, all_details = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:
@@ -465,6 +538,7 @@ class DrRayPPOTrainer(RayPPOTrainer):
                                 scores=scores,
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
+                                all_details=all_details,
                             )
 
                     # validate
@@ -486,6 +560,28 @@ class DrRayPPOTrainer(RayPPOTrainer):
                         "training/epoch": epoch,
                     }
                 )
+                
+                # collect messages length statistics
+                batch_messages = batch.non_tensor_batch.get("messages", [])
+                if batch_messages:
+                    # 断言每个messages都是list
+                    for i, messages in enumerate(batch_messages):
+                        assert isinstance(messages, list), f"messages[{i}] is not a list, got {type(messages)}"
+                    
+                    # 计算每个messages的长度
+                    messages_lengths = [len(messages) for messages in batch_messages]
+                    
+                    if messages_lengths:
+                        # 统计最大、最小、平均和中位数
+                        messages_lengths_array = np.array(messages_lengths)
+                        messages_stats = {
+                            "global_msgs_len/messages_length_max": int(np.max(messages_lengths_array)),
+                            "global_msgs_len/messages_length_min": int(np.min(messages_lengths_array)),
+                            "global_msgs_len/messages_length_mean": float(np.mean(messages_lengths_array)),
+                            "global_msgs_len/messages_length_median": float(np.median(messages_lengths_array)),
+                        }
+                        metrics.update(messages_stats)
+                
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))

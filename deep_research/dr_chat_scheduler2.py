@@ -54,10 +54,11 @@ class DrChatCompletionScheduler(ChatCompletionScheduler):
             self.max_retries = 3
         
     async def _chat_completions_aiohttp(self, address: str, **chat_complete_request) -> ChatCompletion:
+        session = None
         try:
             extra_body = chat_complete_request.pop("extra_body", {})
             chat_complete_request.update(extra_body or {})
-            extra_headers = chat_complete_request.pop("extra_headers")
+            extra_headers = chat_complete_request.pop("extra_headers", {})
             timeout = aiohttp.ClientTimeout(total=None)
             session = aiohttp.ClientSession(timeout=timeout)
             async with session.post(
@@ -65,16 +66,51 @@ class DrChatCompletionScheduler(ChatCompletionScheduler):
                 headers={"Authorization": "Bearer token-abc123", **extra_headers},
                 json=chat_complete_request,
             ) as resp:
-                # data = await resp.json()
-                generator = await resp.json()
-                if isinstance(generator, ErrorResponse):
-                    return JSONResponse(content=generator.model_dump(), status_code=generator.code)
-                if chat_complete_request.stream:
-                    return StreamingResponse(content=generator, media_type="text/event-stream")
-                else:
-                    assert isinstance(generator, ChatCompletionResponse)
-                    return JSONResponse(content=generator.model_dump())
-
+                # 检查响应状态
+                if resp.status != 200:
+                    logger.warning(f"Warning: HTTP {resp.status} response from {address}")
+                    error_text = await resp.text()
+                    logger.warning(f"Error response body: {error_text}")
+                    
+                    # 尝试解析错误响应为JSON
+                    try:
+                        # error_data = json.loads(error_text)
+                        error_data = await resp.json()
+                        logger.warning(f"Parsed error data: {error_data}")
+                    except json.JSONDecodeError:
+                        logger.exception("JSONDecodeError")
+                        error_data = {"error": {"message": error_text, "type": "http_error", "code": resp.status}}
+                    
+                    # 构造一个表示错误的ChatCompletion对象
+                    error_message = error_data.get("error", {}).get("message", error_text) if isinstance(error_data, dict) else str(error_text)
+                    
+                    # 创建错误响应的ChatCompletion格式
+                    error_completion_data = {
+                        "id": f"chatcmpl-error-{uuid4().hex[:8]}",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": chat_complete_request.get("model", "unknown"),
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": f"Error: {error_message}"
+                            },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0
+                        }
+                    }
+                    return ChatCompletion(**error_completion_data)
+                
+                data = await resp.json()
+                # logger.info(f"Success response: {data}")
+                
+                # 直接返回 ChatCompletion 对象
                 return ChatCompletion(**data)
         finally:
-            await session.close()
+            if session:
+                await session.close()

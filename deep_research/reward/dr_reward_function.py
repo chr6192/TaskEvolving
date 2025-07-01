@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from filelock import FileLock
 from meta_info.rewards.card_reward import cardRM_Qwen
-from meta_info.rewards.express_reward import Map_peek_based_openai
-from meta_info.rewards.faithful_reward import Map_faithful_model_based_openai
+from meta_info.rewards.express_reward import Map_peek_based_openai, AsyncMapPeekBasedOpenai
+from meta_info.rewards.faithful_reward import Map_faithful_model_based_openai, AsyncMapFaithfulModelBasedOpenai
 from meta_info.rewards.finance_personalization import personalizationRM
 from meta_info.rewards.finance_rule import (LengthRM,
                                             Map_faithful_rule_based_num_filter,
@@ -87,18 +87,21 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     assistant_contents = extract_assistant_group_messages(group_messages)
 
     # step2: 分不同维度计算分数
-    map_faithful_func = Map_faithful_model_based_openai()
-    map_peek_func = Map_peek_based_openai()
-    think_length_func = ThinkLengthRM()
-    answer_length_func = LengthRM()
+    # map_faithful_func = Map_faithful_model_based_openai()
+    # map_peek_func = Map_peek_based_openai()
+    async_map_faithful_func = AsyncMapFaithfulModelBasedOpenai()
+    async_map_peek_func = AsyncMapPeekBasedOpenai()
+    # think_length_func = ThinkLengthRM()
+    # answer_length_func = LengthRM()
     number_filter_func = Map_faithful_rule_based_num_filter()
     map_format_func = MapFormat()
 
     # 基于工具调用的返回内容、模型生成的内容打分
-    faithful_reward = map_faithful_func(assistant_contents, supply_contents)
-
+    # faithful_reward = map_faithful_func(assistant_contents, supply_contents)
+    faithful_reward = async_map_faithful_func(assistant_contents, supply_contents)
     # 输入处理：1. 当前问题 2. 当前时间   
     # express_reward = map_peek_func(assistant_contents, prompt_contents)
+    express_reward = async_map_peek_func(assistant_contents, prompt_contents)
 
     # 基于生成的思考长度打分，参数是思考长度上限
     # think_length_threshold = [4096 for _ in range(len(assistant_contents))]
@@ -118,7 +121,9 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     # total_score = (torch.tensor(faithful_reward) + torch.tensor(express_reward) + torch.tensor(
     #     think_length_reward) + torch.tensor(answer_length_reward) +
     #                torch.tensor(faithful_num_exist_reward) + torch.tensor(map_format_reward))
-    total_score = (0.6 * torch.tensor(faithful_reward) + 0.2 * torch.tensor(faithful_num_exist_reward) + 0.2 * torch.tensor(map_format_reward))
+    # total_score = (0.6 * torch.tensor(faithful_reward) + 0.2 * torch.tensor(faithful_num_exist_reward) + 0.2 * torch.tensor(map_format_reward))
+    total_score = (0.4 * torch.tensor(faithful_reward) + 0.4 * torch.tensor(express_reward) + 0.1 * torch.tensor(faithful_num_exist_reward) + 0.1 * torch.tensor(map_format_reward))
+
     total_score = total_score.tolist()
     
     # 暂时不使用
@@ -133,7 +138,7 @@ def compute_score(prompt: str, group_responses: list[str], group_messages: list[
     # step4: 记录每项分数
     reward_info = {
         "faithful_reward": faithful_reward,
-        # "express_reward": express_reward,
+        "express_reward": express_reward,
         # "think_length_reward": think_length_reward,
         # "answer_length_reward": answer_length_reward,
         "faithful_num_exist_reward": faithful_num_exist_reward,

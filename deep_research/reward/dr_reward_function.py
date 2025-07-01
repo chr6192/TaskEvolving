@@ -143,8 +143,22 @@ class HybridRewardExecutor:
         return results
     
     def execute_all_sync(self):
-        """同步执行所有任务（使用asyncio.run）"""
-        return asyncio.run(self.execute_all_async())
+        """同步执行所有任务（检测事件循环状态）"""
+        try:
+            # 尝试获取当前事件循环
+            loop = asyncio.get_running_loop()
+            # 如果已经在事件循环中，抛出错误提示
+            raise RuntimeError(
+                "execute_all_sync不能在运行中的事件循环内调用。"
+                "请在异步上下文中使用 await execute_all_async() 代替。"
+            )
+        except RuntimeError as e:
+            if "no running event loop" in str(e):
+                # 没有事件循环，可以安全使用 asyncio.run
+                return asyncio.run(self.execute_all_async())
+            else:
+                # 其他RuntimeError，重新抛出
+                raise
     
     async def _timed_async_call(self, name: str, func, *args, **kwargs):
         """带计时的异步函数调用"""
@@ -240,7 +254,7 @@ async def compute_score_async(prompt: str, group_responses: list[str], group_mes
     )
     
     # step4: 并行执行所有任务
-    results = executor.execute_all_sync()
+    results = await executor.execute_all_async()
     timings = executor.get_timings()
     
     # step5: 提取结果

@@ -225,7 +225,7 @@ class DrRayPPOTrainer(RayPPOTrainer):
             
             # 收集 messages 长度统计
             batch_messages = test_batch.non_tensor_batch.get("messages", [])
-            if batch_messages:
+            if len(batch_messages) > 0:
                 # 断言每个messages都是list
                 for i, messages in enumerate(batch_messages):
                     assert isinstance(messages, list), f"messages[{i}] is not a list, got {type(messages)}"
@@ -563,7 +563,7 @@ class DrRayPPOTrainer(RayPPOTrainer):
                 
                 # collect messages length statistics
                 batch_messages = batch.non_tensor_batch.get("messages", [])
-                if batch_messages:
+                if len(batch_messages) > 0:
                     # 断言每个messages都是list
                     for i, messages in enumerate(batch_messages):
                         assert isinstance(messages, list), f"messages[{i}] is not a list, got {type(messages)}"

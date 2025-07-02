@@ -162,7 +162,13 @@ class HybridRewardExecutor:
             async_coroutines = []
             async_names = []
             for name, func, args, kwargs in self.async_tasks:
-                async_coroutines.append(self._timed_async_call(name, func, *args, **kwargs))
+                # 检查函数是否为异步函数
+                if asyncio.iscoroutinefunction(func) or hasattr(func, '__call__') and asyncio.iscoroutinefunction(func.__call__):
+                    # 直接调用异步函数
+                    async_coroutines.append(self._timed_async_call(name, func, *args, **kwargs))
+                else:
+                    # 同步函数包装为异步
+                    async_coroutines.append(self._timed_sync_to_async_call(name, func, *args, **kwargs))
                 async_names.append(name)
             
             # 等待所有异步任务完成
@@ -219,10 +225,21 @@ class HybridRewardExecutor:
                 raise
     
     async def _timed_async_call(self, name: str, func, *args, **kwargs):
-        """带计时的异步函数调用"""
+        """带计时的异步函数调用 - 直接调用异步函数"""
         start_time = time.perf_counter()
         try:
-            # 使用to_thread在线程中执行，因为__call__方法是同步的但内部有异步机制
+            # 直接await异步函数，不使用线程
+            result = await func(*args, **kwargs)
+            return result
+        finally:
+            end_time = time.perf_counter()
+            self.timings[f"{name}_time"] = round(end_time - start_time, 4)
+    
+    async def _timed_sync_to_async_call(self, name: str, func, *args, **kwargs):
+        """带计时的同步函数异步包装调用"""
+        start_time = time.perf_counter()
+        try:
+            # 同步函数包装为异步
             result = await asyncio.to_thread(func, *args, **kwargs)
             return result
         finally:

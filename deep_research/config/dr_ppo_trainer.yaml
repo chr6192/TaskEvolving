@@ -17,7 +17,7 @@ reward_model:
 actor_rollout_ref:
   rollout:
     multi_turn:
-      chat_scheduler_class_name: "deep_research.dr_chat_scheduler.DrChatCompletionScheduler"
+      chat_scheduler_class_name: "deep_research.dr_chat_scheduler2.DrChatCompletionScheduler"
       chat_scheduler_kwargs:
         max_retries: 3
       # async_server_class_name: "deep_research.dr_vllm_async_server.DrAsyncvLLMServer"

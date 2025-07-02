@@ -58,6 +58,7 @@ ray job submit --address="http://127.0.0.1:8265" \
     data.val_files="$EVAL_DATA" \
     data.return_raw_chat=$return_raw_chat \
     data.train_batch_size=16 \
+    data.val_batch_size=16 \
     data.max_prompt_length=8192 \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \

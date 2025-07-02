@@ -100,7 +100,7 @@ def extract_packing_yjx(group_responses: list[str]) -> List[str]:
                     if tag=='<fin_data_info>':
                         supply = supply.split('\n发布时间:')[-1].strip()
                     elif tag=='<search_info>':
-                    supply = '发布时间:' + supply.split('\n发布时间:')[-1].strip()
+                        supply = '发布时间:' + supply.split('\n发布时间:')[-1].strip()
                     supply_list.append(f'[{prompt_tag} {i} begin]\n{supply}\n[{prompt_tag} {i} end]')
                 save_dict[tag] = '\n'.join(supply_list)
         for tag,value in save_dict.items():

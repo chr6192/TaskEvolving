@@ -54,13 +54,28 @@ def load_all_messages(input_path: str) -> List[List[Dict[str, str]]]:
     return all_messages
 
 
-def process_all(input_path: str, output_path: str) -> None:
+def shiyu_load(input_path,test_num):
+    with open(input_path) as f:
+        data = f.readlines()
+    import pandas as pd
+    data_list = []
+    for dp in data:
+        data_list.append(eval(dp))
+    df = pd.DataFrame(data_list)
+    return df['messages'].tolist()[:test_num],df['output'].tolist()[:test_num]
+
+
+
+def process_all(input_path: str, output_path: str, test_num=1024) -> None:
     """
     加载所有对话消息，一次性调用 compute_score，
     将总分和 reward_info 保存到 JSON 文件。
     """
-    messages_list = load_all_messages(input_path)[:8]
-    total_score, reward_info, reward_details = compute_score("", [""], messages_list, return_details=True)
+    # messages_list = load_all_messages(input_path)[:8]
+
+    messages_list,output_list = shiyu_load(input_path,test_num)
+
+    total_score, reward_info, reward_details = compute_score("", output_list, messages_list, return_details=True)
     print(reward_details)
 
     all_results = []
@@ -68,6 +83,7 @@ def process_all(input_path: str, output_path: str) -> None:
     all_reward_infos = {k: [] for k in reward_info.keys()}
 
     for idx, messages in enumerate(messages_list):
+        # import pdb;pdb.set_trace()
         result = {
             'messages': messages,
             'total_score': total_score[idx] if isinstance(total_score, list) else total_score,
@@ -93,7 +109,15 @@ def process_all(input_path: str, output_path: str) -> None:
 
 
 if __name__ == '__main__':
-    input_file = '/mnt4/code/congling/deep_research/Qwen3-8B-20250628/rollout_data/1.jsonl'
-    output_file = '/mnt4/code/dingyiwen/data/parallel.jsonl'
+    import time
+    input_file = '/mnt4/code/congling/deep_research/Qwen3-32B-20250701-002445/rollout_data/40.jsonl'
+    output_file = '/mnt2/sst/data/temp/parallel.jsonl'
+    start_time = time.time()
     process_all(input_file, output_file)
-    print(f"Processing complete. Results saved to {output_file}")
+    end_time = time.time()
+    import subprocess
+    result = subprocess.run(['wc', '-l', output_file], capture_output=True, text=True)
+    count = int(result.stdout.split()[0])
+    print(f"行数：{count}")
+    print(f"totnum {count} cost time {end_time-start_time}\nProcessing complete. Results saved to {output_file}")
+

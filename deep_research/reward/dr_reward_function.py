@@ -85,7 +85,6 @@ def extract_packing_yjx(group_responses: list[str]) -> List[str]:
                             save_dict['<fin_data_info>'].extend(data_list)
                         else:
                             save_dict['<search_info>'].extend(data_list)
-                        # import pdb;pdb.set_trace()
             except:
                 continue
 
@@ -103,9 +102,12 @@ def extract_packing_yjx(group_responses: list[str]) -> List[str]:
                         supply = '发布时间:' + supply.split('\n发布时间:')[-1].strip()
                     supply_list.append(f'[{prompt_tag} {i} begin]\n{supply}\n[{prompt_tag} {i} end]')
                 save_dict[tag] = '\n'.join(supply_list)
+        supply_empty_flag = True
         for tag,value in save_dict.items():
+            if (value!='') and (tag!='<current_time>'):
+                supply_empty_flag = False
             yjx_rm_consume_template = yjx_rm_consume_template.replace(tag,value)
-        results.append(yjx_rm_consume_template)
+        results.append((yjx_rm_consume_template,supply_empty_flag))
     return results
 
 # 从所有子对话提取最后一轮输出内容
@@ -260,7 +262,7 @@ async def compute_score_async(prompt: str, group_responses: list[str], group_mes
     # assistant_contents: List[str]，模型输出内容列表
     prompt_contents = extract_first_user_contents(group_messages)
     supply_contents = extract_tool_calls(group_messages)
-    yjx_prompts = extract_packing_yjx(group_responses)
+    yjx_contents = extract_packing_yjx(group_responses)
     assistant_contents = extract_assistant_group_messages(group_messages)
 
     # step2: 分不同维度计算分数
@@ -281,7 +283,7 @@ async def compute_score_async(prompt: str, group_responses: list[str], group_mes
     executor.add_async_reward(
         "faithful_reward", 
         async_map_faithful_func, 
-        assistant_contents, yjx_prompts
+        assistant_contents, yjx_contents
     )
     executor.add_async_reward(
         "express_reward",
@@ -319,6 +321,7 @@ async def compute_score_async(prompt: str, group_responses: list[str], group_mes
     express_reward = results["express_reward"]
     faithful_num_exist_reward = results["faithful_num_exist_reward"]
     map_format_reward = results["map_format_reward"]
+
 
     # total_score = (torch.tensor(faithful_reward) + torch.tensor(express_reward) + torch.tensor(
     #     think_length_reward) + torch.tensor(answer_length_reward) +

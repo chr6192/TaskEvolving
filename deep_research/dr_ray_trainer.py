@@ -353,6 +353,10 @@ class DrRayPPOTrainer(RayPPOTrainer):
                 )
 
                 is_last_step = self.global_steps >= self.total_training_steps
+                
+                # 声明变量以确保在整个函数中都可以访问
+                reward_extra_infos_dict: dict[str, list] = {}
+                all_details = None
 
                 with marked_timer("step", timing_raw):
                     # generate a batch
@@ -463,8 +467,8 @@ class DrRayPPOTrainer(RayPPOTrainer):
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
-                        all_details = None  # 初始化 all_details
+                        # reward_extra_infos_dict: dict[str, list]
+                        # all_details: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict, all_details = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor

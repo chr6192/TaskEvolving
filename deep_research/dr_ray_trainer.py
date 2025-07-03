@@ -146,6 +146,7 @@ class DrRayPPOTrainer(RayPPOTrainer):
         sample_inputs = []
         sample_outputs = []
         sample_scores = []
+        sample_messages = []  # 收集所有的 messages
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -225,6 +226,8 @@ class DrRayPPOTrainer(RayPPOTrainer):
             
             # 收集 messages 长度统计
             batch_messages = test_batch.non_tensor_batch.get("messages", [])
+            
+            # 确保每个样本都有对应的 messages，如果没有就用空列表
             if len(batch_messages) > 0:
                 # 断言每个messages都是list
                 for i, messages in enumerate(batch_messages):
@@ -233,6 +236,14 @@ class DrRayPPOTrainer(RayPPOTrainer):
                 # 计算每个messages的长度并收集
                 batch_messages_lengths = [len(messages) for messages in batch_messages]
                 all_messages_lengths.extend(batch_messages_lengths)
+                
+                # 收集所有的 messages
+                sample_messages.extend(batch_messages)
+            else:
+                # 如果没有 messages，为每个样本添加空列表
+                num_samples = len(scores)  # scores 是当前 batch 的 scores
+                empty_messages = [[] for _ in range(num_samples)]
+                sample_messages.extend(empty_messages)
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -240,7 +251,7 @@ class DrRayPPOTrainer(RayPPOTrainer):
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
             self._dump_generations(
-                messages=test_batch.non_tensor_batch.get("messages", []),
+                messages=sample_messages,
                 inputs=sample_inputs,
                 outputs=sample_outputs,
                 scores=sample_scores,

@@ -335,9 +335,27 @@ async def compute_score_async(prompt: str, group_responses: list[str], group_mes
     
     # step5: 提取结果
     faithful_reward, faithful_details = results["faithful_reward"]
-    express_reward = results["express_reward"]
-    faithful_num_exist_reward = results["faithful_num_exist_reward"]
-    map_format_reward = results["map_format_reward"]
+    
+    express_result = results["express_reward"]
+    if isinstance(express_result, tuple):
+        express_reward, express_details = express_result
+    else:
+        express_reward = express_result
+        express_details = [{"express_score": score} for score in express_result]
+    
+    num_exist_result = results["faithful_num_exist_reward"]
+    if isinstance(num_exist_result, tuple):
+        faithful_num_exist_reward, num_exist_details = num_exist_result
+    else:
+        faithful_num_exist_reward = num_exist_result
+        num_exist_details = [{"num_exist_score": score} for score in num_exist_result]
+    
+    format_result = results["map_format_reward"]
+    if isinstance(format_result, tuple):
+        map_format_reward, format_details = format_result
+    else:
+        map_format_reward = format_result
+        format_details = [{"format_score": score} for score in format_result]
 
 
     # total_score = (torch.tensor(faithful_reward) + torch.tensor(express_reward) + torch.tensor(
@@ -361,9 +379,31 @@ async def compute_score_async(prompt: str, group_responses: list[str], group_mes
     # personlization_reward = personalization_func(supply_contents, assistant_contents)
     # timings['personalization_reward_time'] = time.perf_counter() - start
 
+    print("\n" + "="*80)
+    print("奖励计算完成 - 详细信息")
+    print("="*80)
     print(f"混合并行reward计算耗时: {timings}")
     print(f"异步任务数: {len(executor.async_tasks)}, 同步任务数: {len(executor.sync_tasks)}")
     print(f"总计算时间: {sum(timings.values()):.4f}秒")
+    
+    for i in range(len(assistant_contents)):
+        print(f"\n--- 样本 {i} ---")
+        print(f"忠实性奖励: {faithful_reward[i]:.4f}")
+        print(f"体感奖励: {express_reward[i]:.4f}")
+        print(f"数字规则奖励: {faithful_num_exist_reward[i]:.4f}")
+        print(f"格式规则奖励: {map_format_reward[i]:.4f}")
+        print(f"总分: {total_score[i]:.4f}")
+        
+        if i < len(faithful_details):
+            print(f"  忠实性错误数: {faithful_details[i].get('faithful_error_count', 'N/A')}")
+        if i < len(express_details):
+            print(f"  体感原始分: {express_details[i].get('express_raw_score', 'N/A')}")
+        if i < len(num_exist_details):
+            print(f"  无中生有的数字: {num_exist_details[i].get('num_exist_errors', [])}")
+        if i < len(format_details):
+            print(f"  格式错误数: {format_details[i].get('format_error_count', 0)}")
+    
+    print("="*80 + "\n")
     
     reward_info = {
         "faithful_reward": faithful_reward,
@@ -376,16 +416,34 @@ async def compute_score_async(prompt: str, group_responses: list[str], group_mes
     
     reward_details = []
 
-    # 遍历 faithful_details 的字段，去除以 "tmp" 结尾的键，并添加耗时信息
-    for i, detail in enumerate(faithful_details):
-        filtered_detail = {key: value for key, value in detail.items() if not key.endswith("tmp")}
-        # 将耗时信息添加到每个reward_detail中
-        filtered_detail.update(timings)
-        reward_details.append(filtered_detail)
-
-    # 如果reward_details为空（比如faithful_details为空），确保至少有耗时信息
-    if not reward_details:
-        reward_details = [timings for _ in range(len(assistant_contents))]
+    # 构建综合的reward_details
+    for i in range(len(assistant_contents)):
+        detail = {
+            "index": i,
+            "total_score": total_score[i]
+        }
+        
+        # 合并faithful详情（去除tmp后缀的字段）
+        if i < len(faithful_details):
+            faithful_detail = {key: value for key, value in faithful_details[i].items() if not key.endswith("tmp")}
+            detail.update(faithful_detail)
+        
+        # 合并express详情
+        if i < len(express_details):
+            detail.update(express_details[i])
+        
+        # 合并num_exist详情
+        if i < len(num_exist_details):
+            detail.update(num_exist_details[i])
+        
+        # 合并format详情
+        if i < len(format_details):
+            detail.update(format_details[i])
+        
+        # 添加耗时信息
+        detail.update(timings)
+        
+        reward_details.append(detail)
 
     if return_details:
         return total_score, reward_info, reward_details

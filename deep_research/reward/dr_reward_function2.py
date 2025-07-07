@@ -338,22 +338,18 @@ async def compute_score_async(
                 "performance_stats": {
                     "total_time": total_time,
                     "individual_timings": timings,
-                    "parallel_efficiency": {
-                        "io_tasks": len(executor.io_tasks),
-                        "cpu_tasks": len(executor.cpu_tasks)
-                    }
                 }
             }
             
             # 合并各个reward的详细信息
             if i < len(faithful_details):
-                detail.update(_clean_detail_dict(faithful_details[i]))
+                detail.update({"faithful_details": _clean_detail_dict(faithful_details[i])})
             if i < len(express_details):
-                detail.update(_clean_detail_dict(express_details[i]))
+                detail.update({"express_details": _clean_detail_dict(express_details[i])})
             if i < len(num_exist_details):
-                detail.update(_clean_detail_dict(num_exist_details[i]))
+                detail.update({"num_exist_details": _clean_detail_dict(num_exist_details[i])})
             if i < len(format_details):
-                detail.update(_clean_detail_dict(format_details[i]))
+                detail.update({"format_details": _clean_detail_dict(format_details[i])})
                 
             reward_details.append(detail)
             

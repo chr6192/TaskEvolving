@@ -11,21 +11,26 @@ from deep_research.reward.dr_reward_function import (
 )
 
 from meta_info.rewards.faithful_reward import (
-    AsyncMapFaithfulModelBasedOpenai, 
+    AsyncMapFaithfulModel, 
+    SyncMapFaithfulModel,
 )
 from meta_info.rewards.express_reward import (
-    AsyncMapPeekBasedOpenai, 
+    AsyncMapPeekModel, 
+    SyncMapPeekModel,
 )
 from meta_info.rewards.finance_rule import (
-    Map_faithful_rule_based_num_filter, MapFormat
+    MapFaithfulRuleBasedNumFilter, MapFormat
 )
 
 
 class HybridRewardExecutor:
     """
-    简化的混合并行执行器，统一使用 asyncio.to_thread
-    - IO密集型任务：完全异步并行
-    - CPU密集型任务：使用 asyncio.to_thread，由 asyncio 统一管理线程池
+    优化的混合并行执行器，统一使用 asyncio.to_thread
+    新架构特点：
+    - 所有任务：统一由asyncio.to_thread管理，避免异步协调开销
+    - faithful/express任务：内部使用call_async+as_completed实现真正并行
+    - 规则任务：纯CPU计算，使用线程池处理
+    - 架构更清晰：中层专注业务逻辑，上层统一管理并发
     - 避免自维护线程池的复杂性和死锁风险
     """
     
@@ -147,11 +152,12 @@ async def compute_score_async(
     """
     异步reward计算函数
     
-    优化策略：
-    1. IO密集型任务：完全异步并行，避免阻塞等待
-    2. CPU密集型任务：使用全局线程池，避免资源竞争
-    3. 4个reward函数间：真正的并行执行
-    4. 保持三层并行架构的优势
+    新架构优化策略：
+    1. 所有任务：统一由asyncio.to_thread管理，避免异步协调开销
+    2. faithful/express任务：内部使用call_async+as_completed实现真正并行
+    3. 规则任务：纯CPU计算，使用线程池处理
+    4. 4个reward函数间：真正的并行执行
+    5. 架构更清晰：中层专注业务逻辑，上层统一管理并发
     
     Args:
         prompt: 当前问题
@@ -181,24 +187,29 @@ async def compute_score_async(
     
     # step2: 创建优化的执行器
     executor = HybridRewardExecutor()
-    
+
     # step3: 注册IO密集型任务（网络请求）
-    faithful_func = AsyncMapFaithfulModelBasedOpenai()
-    express_func = AsyncMapPeekBasedOpenai()
+    # faithful_func = AsyncMapFaithfulModelBasedOpenai()
+    # express_func = AsyncMapPeekBasedOpenai()
+
+    # step3: 注册IO密集型任务（网络请求）- 使用批量并行同步版本
+    faithful_func = SyncMapFaithfulModel()
+    express_func = SyncMapPeekModel()
     
-    executor.add_io_task(
+    # 修改为CPU任务，由asyncio.to_thread统一管理
+    executor.add_cpu_task(
         "faithful_reward",
         faithful_func,
         assistant_contents, yjx_contents
     )
-    executor.add_io_task(
+    executor.add_cpu_task(
         "express_reward", 
         express_func,
         assistant_contents, prompt_contents
     )
     
     # step4: 注册CPU密集型任务（本地计算）
-    num_filter_func = Map_faithful_rule_based_num_filter()
+    num_filter_func = MapFaithfulRuleBasedNumFilter()
     format_func = MapFormat()
     
     # 创建部分函数，绑定第二个参数
@@ -250,8 +261,14 @@ async def compute_score_async(
     
     # 确保所有reward列表长度一致
     expected_length = len(assistant_contents)
-    for reward_list in [faithful_reward, express_reward, faithful_num_exist_reward, map_format_reward]:
-        assert len(reward_list) == expected_length, f"{reward_list.__name__}长度不正确: {len(reward_list)} != {expected_length}"
+    reward_dict = {
+        "faithful_reward": faithful_reward,
+        "express_reward": express_reward,
+        "faithful_num_exist_reward": faithful_num_exist_reward,
+        "map_format_reward": map_format_reward
+    }
+    for reward_name, reward_list in reward_dict.items():
+        assert len(reward_list) == expected_length, f"{reward_name}长度不正确: {len(reward_list)} != {expected_length}"
     
     # step7: 计算总分 - 加权平均
     total_score = (

@@ -13,13 +13,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 from filelock import FileLock
 from meta_info.rewards.card_reward import cardRM_Qwen
-from meta_info.rewards.express_reward import (AsyncMapPeekBasedOpenai,
-                                               Map_peek_based_openai)
+from meta_info.rewards.express_reward import (AsyncMapPeekModel,
+                                               MapPeekModel)
 from meta_info.rewards.faithful_reward import (
-    AsyncMapFaithfulModelBasedOpenai, Map_faithful_model_based_openai)
+    AsyncMapFaithfulModel, MapFaithfulModel)
 from meta_info.rewards.finance_personalization import personalizationRM
 from meta_info.rewards.finance_rule import (LengthRM,
-                                            Map_faithful_rule_based_num_filter,
+                                            MapFaithfulRuleBasedNumFilter,
                                             MapFormat, ThinkLengthRM)
 
 from atomic_eval.simple_eval import SimpleEvaluator
@@ -285,11 +285,11 @@ async def compute_score_async(prompt: str, group_responses: list[str], group_mes
     # step2: 分不同维度计算分数
     # map_faithful_func = Map_faithful_model_based_openai()
     # map_peek_func = Map_peek_based_openai()
-    async_map_faithful_func = AsyncMapFaithfulModelBasedOpenai()
-    async_map_peek_func = AsyncMapPeekBasedOpenai()
+    async_map_faithful_func = AsyncMapFaithfulModel()
+    async_map_peek_func = AsyncMapPeekModel()
     # think_length_func = ThinkLengthRM()
     # answer_length_func = LengthRM()
-    number_filter_func = Map_faithful_rule_based_num_filter()
+    number_filter_func = MapFaithfulRuleBasedNumFilter()
     map_format_func = MapFormat()
     
     executor = HybridRewardExecutor()

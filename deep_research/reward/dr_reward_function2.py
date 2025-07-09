@@ -1,13 +1,8 @@
 import asyncio
-import concurrent.futures
-import threading
 from typing import Any, Dict, List, Optional, Tuple, Union
 from functools import wraps
 import time
 import torch
-import copy
-import json
-import os
 
 from deep_research.reward.dr_reward_function import (
     extract_first_user_contents, extract_tool_calls, 
@@ -26,92 +21,18 @@ from meta_info.rewards.finance_rule import (
 )
 
 
-class GlobalThreadPoolManager:
+class HybridRewardExecutor:
     """
-    全局线程池管理器，避免多实例创建导致的资源竞争
-    单例模式，确保整个应用只有一个线程池
-    """
-    _instance = None
-    _lock = threading.Lock()
-    
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
-    
-    def __init__(self):
-        if not hasattr(self, '_initialized'):
-            # 根据CPU核心数设置合理的线程池大小
-            # 对于规则计算这种轻量级CPU任务，可以设置较多线程
-            max_workers = min(os.cpu_count() * 2, 16)  # 最多16个线程
-            self.executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=max_workers,
-                thread_name_prefix="DR_CPU_Worker"
-            )
-            self._initialized = True
-            self._is_shutdown = False
-            print(f"创建全局线程池，线程数: {max_workers}")
-    
-    def get_executor(self):
-        """
-        获取线程池执行器
-        
-        Returns:
-            ThreadPoolExecutor: 线程池执行器
-            
-        Raises:
-            RuntimeError: 如果线程池已经被关闭
-        """
-        if getattr(self, '_is_shutdown', False):
-            raise RuntimeError("线程池已经被关闭，无法继续使用")
-        return self.executor
-    
-    def shutdown(self):
-        """
-        关闭线程池
-        
-        注意：关闭后将无法再使用，需要重新创建实例
-        """
-        if hasattr(self, 'executor') and not getattr(self, '_is_shutdown', False):
-            self.executor.shutdown(wait=True)
-            self._is_shutdown = True
-            print("全局线程池已关闭")
-            
-    def is_shutdown(self):
-        """检查线程池是否已关闭"""
-        return getattr(self, '_is_shutdown', False)
-
-
-class OptimizedHybridRewardExecutor:
-    """
-    优化的混合并行执行器，采用混合并行优化策略：
-    - IO密集型任务：完全异步并行，避免阻塞等待
-    - CPU密集型任务：使用全局线程池，避免资源竞争
-    - 三层并行架构:
-        第一层: AntfinRewardManager
-            ├── Group1 (相同prompt的样本)
-            ├── Group2 (相同prompt的样本)
-            └── GroupN (相同prompt的样本)
-                ↓ 并行处理
-        第二层: HybridRewardExecutor
-            ├── faithful_reward (IO密集)
-            ├── express_reward (IO密集)
-            ├── faithful_num_exist_reward (CPU密集)
-            └── map_format_reward (CPU密集)
-                ↓ 每个reward内部并行
-        第三层: 单个Reward函数内部
-            ├── 样本1
-            ├── 样本2
-            └── 样本N
+    简化的混合并行执行器，统一使用 asyncio.to_thread
+    - IO密集型任务：完全异步并行
+    - CPU密集型任务：使用 asyncio.to_thread，由 asyncio 统一管理线程池
+    - 避免自维护线程池的复杂性和死锁风险
     """
     
     def __init__(self):
         self.timings = {}
         self.io_tasks = []  # IO密集型任务列表
         self.cpu_tasks = []  # CPU密集型任务列表
-        self.thread_pool = GlobalThreadPoolManager().get_executor()
         
     def add_io_task(self, name: str, async_func, *args, **kwargs):
         """添加IO密集型异步任务"""
@@ -122,45 +43,55 @@ class OptimizedHybridRewardExecutor:
         self.cpu_tasks.append((name, func_instance, args, kwargs))
         
     async def execute_all_parallel(self):
-        """并行执行所有任务 - IO用异步，CPU用全局线程池"""
+        """并行执行所有任务 - 统一使用asyncio管理"""
         results = {}
         
-        # 创建所有任务的协程列表
-        all_coroutines = []
-        task_names = []
-        
-        # IO密集型任务：直接创建异步协程
-        for name, async_func, args, kwargs in self.io_tasks:
-            coro = self._execute_io_task(name, async_func, *args, **kwargs)
-            all_coroutines.append(coro)
-            task_names.append(name)
+        try:
+            # 创建所有任务的协程列表
+            all_coroutines = []
+            task_names = []
             
-        # CPU密集型任务：使用全局线程池包装成协程
-        for name, func_instance, args, kwargs in self.cpu_tasks:
-            coro = self._execute_cpu_task(name, func_instance, *args, **kwargs)
-            all_coroutines.append(coro)
-            task_names.append(name)
+            # IO密集型任务：直接创建异步协程
+            for name, async_func, args, kwargs in self.io_tasks:
+                coro = self._execute_io_task(name, async_func, *args, **kwargs)
+                all_coroutines.append(coro)
+                task_names.append(name)
+                
+            # CPU密集型任务：使用 asyncio.to_thread 包装
+            for name, func_instance, args, kwargs in self.cpu_tasks:
+                coro = self._execute_cpu_task(name, func_instance, *args, **kwargs)
+                all_coroutines.append(coro)
+                task_names.append(name)
+                
+            # 真正的并行执行：所有任务同时运行
+            print(f"开始并行执行 {len(all_coroutines)} 个任务")
+            start_time = time.perf_counter()
             
-        # 真正的并行执行：所有任务同时运行
-        print(f"开始并行执行 {len(all_coroutines)} 个任务")
-        start_time = time.perf_counter()
-        
-        task_results = await asyncio.gather(*all_coroutines, return_exceptions=True)
-        
-        total_time = time.perf_counter() - start_time
-        print(f"所有任务并行执行完成，总耗时: {total_time:.4f}秒")
-        
-        # 处理结果
-        for i, (name, result) in enumerate(zip(task_names, task_results)):
-            if isinstance(result, Exception):
-                print(f"任务 {name} 执行出错: {result}")
-                # 根据任务类型返回合适的默认值
+            task_results = await asyncio.gather(*all_coroutines, return_exceptions=True)
+            
+            total_time = time.perf_counter() - start_time
+            print(f"所有任务并行执行完成，总耗时: {total_time:.4f}秒")
+            
+            # 处理结果
+            for i, (name, result) in enumerate(zip(task_names, task_results)):
+                if isinstance(result, Exception):
+                    print(f"任务 {name} 执行出错: {result}")
+                    # 根据任务类型返回合适的默认值
+                    if name in ["faithful_reward", "express_reward"]:
+                        results[name] = ([], [])
+                    else:
+                        results[name] = []
+                else:
+                    results[name] = result
+                    
+        except Exception as e:
+            print(f"并行执行任务时发生错误: {e}")
+            # 返回默认结果
+            for name in [task[0] for task in self.io_tasks + self.cpu_tasks]:
                 if name in ["faithful_reward", "express_reward"]:
                     results[name] = ([], [])
                 else:
                     results[name] = []
-            else:
-                results[name] = result
                 
         return results
         
@@ -180,18 +111,13 @@ class OptimizedHybridRewardExecutor:
             self.timings[f"{name}_time"] = round(end_time - start_time, 4)
             
     async def _execute_cpu_task(self, name: str, func_instance, *args, **kwargs):
-        """执行CPU密集型任务 - 使用全局线程池"""
+        """执行CPU密集型任务 - 使用 asyncio.to_thread"""
         start_time = time.perf_counter()
         try:
             print(f"开始执行CPU任务: {name}")
-            loop = asyncio.get_running_loop()
             
-            # 使用全局线程池执行任务
-            result = await loop.run_in_executor(
-                self.thread_pool,
-                func_instance,
-                *args
-            )
+            # 关键改进：使用 asyncio.to_thread 代替自维护线程池
+            result = await asyncio.to_thread(func_instance, *args)
                 
             print(f"CPU任务 {name} 执行完成")
             return result
@@ -254,7 +180,7 @@ async def compute_score_async(
     print(f"数据预处理完成: {len(assistant_contents)} 个助手回复")
     
     # step2: 创建优化的执行器
-    executor = OptimizedHybridRewardExecutor()
+    executor = HybridRewardExecutor()
     
     # step3: 注册IO密集型任务（网络请求）
     faithful_func = AsyncMapFaithfulModelBasedOpenai()
@@ -324,10 +250,8 @@ async def compute_score_async(
     
     # 确保所有reward列表长度一致
     expected_length = len(assistant_contents)
-    faithful_reward = _ensure_length(faithful_reward, expected_length)
-    express_reward = _ensure_length(express_reward, expected_length)
-    faithful_num_exist_reward = _ensure_length(faithful_num_exist_reward, expected_length)
-    map_format_reward = _ensure_length(map_format_reward, expected_length)
+    for reward_list in [faithful_reward, express_reward, faithful_num_exist_reward, map_format_reward]:
+        assert len(reward_list) == expected_length, f"{reward_list.__name__}长度不正确: {len(reward_list)} != {expected_length}"
     
     # step7: 计算总分 - 加权平均
     total_score = (
@@ -357,7 +281,7 @@ async def compute_score_async(
     print(f"IO任务数={len(executor.io_tasks)}, CPU任务数={len(executor.cpu_tasks)}")
     
     # 详细性能分析
-    for i in range(min(len(assistant_contents), 3)):  # 只显示前3个样本
+    for i in range(min(len(assistant_contents), 3)):
         print(f"\n--- 样本 {i} ---")
         print(f"忠实性奖励: {faithful_reward[i]:.4f}")
         print(f"体感奖励: {express_reward[i]:.4f}")
@@ -384,32 +308,21 @@ async def compute_score_async(
             }
             
             # 合并各个reward的详细信息
-            if i < len(faithful_details):
-                detail.update({"faithful_details": _clean_detail_dict(faithful_details[i])})
-            if i < len(express_details):
-                detail.update({"express_details": _clean_detail_dict(express_details[i])})
-            if i < len(num_exist_details):
-                detail.update({"num_exist_details": _clean_detail_dict(num_exist_details[i])})
-            if i < len(format_details):
-                detail.update({"format_details": _clean_detail_dict(format_details[i])})
-                
+            detail_sources = [
+                ("faithful_details", faithful_details),
+                ("express_details", express_details),
+                ("num_exist_details", num_exist_details),
+                ("format_details", format_details)
+            ]
+            
+            for detail_key, detail_list in detail_sources:
+                if i < len(detail_list):
+                    detail.update({detail_key: _clean_detail_dict(detail_list[i])})
             reward_details.append(detail)
             
         return total_score, reward_info, reward_details
     else:
         return total_score, reward_info
-
-
-def _ensure_length(reward_list: List[float], expected_length: int) -> List[float]:
-    """确保reward列表长度正确"""
-    if len(reward_list) == expected_length:
-        return reward_list
-    elif len(reward_list) < expected_length:
-        # 长度不足，用0填充
-        return reward_list + [0.0] * (expected_length - len(reward_list))
-    else:
-        # 长度过长，截断
-        return reward_list[:expected_length]
 
 
 def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -420,7 +333,6 @@ def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
     # 移除以_tmp结尾的字段
     cleaned = {k: v for k, v in detail_dict.items() if not k.endswith("_tmp")}
     return cleaned
-
 
 def compute_score(
     prompt: str, 
@@ -439,6 +351,9 @@ def compute_score(
     内部使用异步优化版本，通过asyncio.run包装
     适用于不在异步上下文中的调用场景
     """
+    # 设置超时时间
+    timeout = kwargs.get('timeout', 300.0)
+    
     try:
         # 检查是否已经在事件循环中
         loop = asyncio.get_running_loop()
@@ -450,30 +365,41 @@ def compute_score(
     except RuntimeError as e:
         if "no running event loop" in str(e):
             # 没有事件循环，可以安全使用 asyncio.run
-            return asyncio.run(compute_score_async(
-                prompt, group_responses, group_messages, 
-                group_extras=group_extras, 
-                use_group_reward=use_group_reward, 
-                return_details=return_details, 
-                return_statistics=return_statistics, 
-                **kwargs
-            ))
+            try:
+                # 使用 asyncio.run 启动异步任务，但添加超时保护
+                return asyncio.run(
+                    asyncio.wait_for(
+                        compute_score_async(
+                            prompt, group_responses, group_messages, 
+                            group_extras=group_extras, 
+                            use_group_reward=use_group_reward, 
+                            return_details=return_details, 
+                            return_statistics=return_statistics, 
+                            **kwargs
+                        ),
+                        timeout=timeout
+                    )
+                )
+            except asyncio.TimeoutError:
+                print(f"compute_score超时 ({timeout}秒)")
+                # 返回默认值
+                default_scores = [0.0] * len(group_responses)
+                default_info = {}
+                if return_details:
+                    return default_scores, default_info, []
+                else:
+                    return default_scores, default_info
+            except Exception as e:
+                print(f"compute_score执行异常: {e}")
+                # 返回默认值
+                default_scores = [0.0] * len(group_responses)
+                default_info = {}
+                if return_details:
+                    return default_scores, default_info, []
+                else:
+                    return default_scores, default_info
         else:
             # 其他RuntimeError，重新抛出
             raise
 
-
-# 提供显式的清理方法，让调用者在适当的时候调用
-def cleanup_thread_pool():
-    """
-    显式清理全局线程池
-    
-    注意：只有在确定不再需要使用DR reward计算时才调用此函数
-    通常在程序结束或需要重新初始化时使用
-    """
-    try:
-        GlobalThreadPoolManager().shutdown()
-        print("手动清理全局线程池完成")
-    except:
-        pass
 

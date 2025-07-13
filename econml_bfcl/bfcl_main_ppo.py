@@ -15,14 +15,18 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
+import os
+import socket
+
 import hydra
 import ray
+from omegaconf import OmegaConf
 
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 
 
-@hydra.main(config_path="../config", config_name="ppo_trainer", version_base=None)
+@hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     run_ppo(config)
 
@@ -42,7 +46,11 @@ def run_ppo(config) -> None:
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
-    runner = TaskRunner.remote()
+    if OmegaConf.select(config.trainer, "profile_steps") is not None and len(OmegaConf.select(config.trainer, "profile_steps")) > 0:
+        nsight_options = OmegaConf.to_container(config.trainer.controller_nsight_options)
+        runner = TaskRunner.options(runtime_env={"nsight": nsight_options}).remote()
+    else:
+        runner = TaskRunner.remote()
     ray.get(runner.run.remote(config))
 
     # [Optional] get the path of the timeline trace file from the configuration, default to None
@@ -62,7 +70,10 @@ class TaskRunner:
 
         from verl.utils.fs import copy_to_local
 
+        print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+
         pprint(OmegaConf.to_container(config, resolve=True))
+
         OmegaConf.resolve(config)
 
         # Download the checkpoint from HDFS to the local machine.
@@ -157,8 +168,11 @@ class TaskRunner:
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
+        # Determine which trainer class to use
+        trainer_cls = get_trainer_class(config)
+
         # Initialize the PPO trainer.
-        trainer = RayPPOTrainer(
+        trainer = trainer_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
@@ -177,6 +191,55 @@ class TaskRunner:
         trainer.init_workers()
         # Start the training process.
         trainer.fit()
+
+
+def get_trainer_class(config):
+    """Determine which trainer class to use based on configuration.
+    
+    Arguments:
+        config: The configuration object.
+        
+    Returns:
+        trainer_cls: The trainer class to use.
+    """
+    
+    # Check if a custom trainer class is specified in the configuration
+    custom_class_path = None
+    if hasattr(config, 'trainer'):
+        if hasattr(config.trainer, 'custom_class_path') and config.trainer.custom_class_path is not None:
+            # Format: custom_class_path = "module.path.ClassName"
+            custom_class_path = config.trainer.custom_class_path
+    
+    if custom_class_path:
+        import importlib
+        
+        print(f"Loading custom trainer class from path: {custom_class_path}")
+        
+        try:
+            # Split the path to get module path and class name
+            # Assume the class name is the last part after the last dot
+            parts = custom_class_path.split(".")
+            class_name = parts[-1]
+            module_path = ".".join(parts[:-1])
+            
+            # Import the module and get the class
+            module = importlib.import_module(module_path)
+            trainer_cls = getattr(module, class_name)
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to load trainer class from '{custom_class_path}': {e}") from e
+        
+        # Verify that the custom trainer class inherits from RayPPOTrainer
+        if not issubclass(trainer_cls, RayPPOTrainer):
+            raise TypeError(f"The custom trainer class '{class_name}' from '{custom_class_path}' must inherit from RayPPOTrainer")
+            
+        print(f"Using custom trainer class: {trainer_cls.__name__}")
+    else:
+        # Use the default RayPPOTrainer class if no custom class is specified
+        trainer_cls = RayPPOTrainer
+        print(f"Using default trainer class: {trainer_cls.__name__}")
+    
+    return trainer_cls
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor):

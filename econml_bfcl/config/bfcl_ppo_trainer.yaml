@@ -6,6 +6,10 @@ defaults:
   - ppo_trainer
   - _self_
 
+# 自定义trainer配置
+trainer:
+  custom_class_path: "econml_bfcl.bfcl_ray_trainer.BfclRayPPOTrainer"
+
 reward_model:
   reward_kwargs:
     reward_manager_class_path: "econml_bfcl.reward.bfcl_reward_manager.BfclRewardManager"

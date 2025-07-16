@@ -120,4 +120,3 @@ if __name__ == '__main__':
     count = int(result.stdout.split()[0])
     print(f"行数：{count}")
     print(f"totnum {count} cost time {end_time-start_time}\nProcessing complete. Results saved to {output_file}")
-

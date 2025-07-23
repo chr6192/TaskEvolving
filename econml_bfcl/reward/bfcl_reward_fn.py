@@ -13,23 +13,28 @@
 # limitations under the License.
 
 import re
+from typing import Any, Dict, List, Optional, Tuple, Union
 from econml_bfcl.tool.env_handler import EnvHandler
 
 
-def compute_score(messages, original_test_entry):
+def compute_score(messages, original_test_entry, return_details=False, score_dir="/redacted/internal-path"):
     """The scoring function for BFCL.
 
     Args:
         messages: List of conversation messages
         original_test_entry: The original test entry data
+        return_details: Whether to return detailed information
+        score_dir: Directory path for storing score details
         
     Returns:
-        Float score representing the evaluation result
+        If return_details=False: Float score representing the evaluation result
+        If return_details=True: Tuple of (score, reward_info, details)
     """
     messages = messages.get("messages", messages) if isinstance(messages, dict) else messages
     assert isinstance(messages, list), f"messages is not a list: {messages}"
     messages = [msg.model_dump() if hasattr(msg, 'model_dump') else msg for msg in messages]
     assert isinstance(original_test_entry, dict), f"original_test_entry is not a dict: {original_test_entry}"
+    
     try:
         # Initialize EnvHandler
         env_handler = EnvHandler()
@@ -68,44 +73,72 @@ def compute_score(messages, original_test_entry):
         }
         
         # Call EnvHandler.evaluate
-        eval_result = env_handler.evaluate(test_entry)
-        # 将test_entry和eval_result写入本地json文件
-        import json
-        import os
-        from datetime import datetime
+        eval_result = env_handler.evaluate(test_entry, score_dir=score_dir)
         
-        # 创建输出目录
-        output_dir = "/redacted/internal-path"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 生成文件名,包含时间戳
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{output_dir}/reward_logx.json"
-        
-        # 准备要写入的数据
-        log_data = {
-            "messages": messages,
-            "eval_result": eval_result
-        }
-        
-        # 追加写入json文件
-        try:
-            with open(filename, "a", encoding="utf-8") as f:
-                json.dump(log_data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"写入日志文件失败: {str(e)}")
         # Extract score from evaluation result
-        # if eval_result.get("valid", True):
-        #     return eval_result.get("accuracy")
-
-        # else:
-        #     print(f"Evaluation error: {eval_result.get('error', 'Unknown error')}")
-        #     raise Exception(f"Evaluation error: {eval_result.get('error', 'Unknown error')}")
-        #     return 0.0
-        import random
-        return random.choice([0, 1])
+        if eval_result.get("valid", True):
+            score = eval_result.get("accuracy", 0.0)
+            
+            if return_details:
+                # 构建详细信息
+                reward_info = {
+                    "accuracy": score,
+                    "valid": eval_result.get("valid", True),
+                    "total_count": eval_result.get("total_count", 1),
+                    "correct_count": eval_result.get("correct_count", 0),
+                    "turn_count": turn_count
+                }
+                
+                details = {
+                    "test_id": test_id,
+                    "test_category": eval_result.get("test_category", "unknown"),
+                    "model_name": eval_result.get("model_name", "unknown"),
+                    "completed": completed,
+                    "eval_result": eval_result,
+                    "original_test_entry": original_test_entry
+                }
+                
+                return score, reward_info, details
+            else:
+                return score
+        else:
+            print(f"Evaluation error: {eval_result.get('error', 'Unknown error')}")
+            error_msg = f"Evaluation error: {eval_result.get('error', 'Unknown error')}"
+            
+            if return_details:
+                reward_info = {
+                    "accuracy": -99.0,
+                    "valid": False,
+                    "error": eval_result.get('error', 'Unknown error'),
+                    "turn_count": turn_count
+                }
+                details = {
+                    "test_id": test_id,
+                    "error": eval_result.get('error', 'Unknown error'),
+                    "eval_result": eval_result,
+                    "original_test_entry": original_test_entry
+                }
+                return -99.0, reward_info, details
+            else:
+                raise Exception(error_msg)
             
     except Exception as e:
         print(f"Error in compute_score: {str(e)}\nmessages: {messages}\nkeys of original_test_entry: {original_test_entry.keys()}")
-        raise Exception(f"Error in compute_score: {str(e)}\nmessages: {messages}\nkeys of original_test_entry: {original_test_entry.keys()}")
-        return 0.0
+        error_msg = f"Error in compute_score: {str(e)}\nmessages: {messages}\nkeys of original_test_entry: {original_test_entry.keys()}"
+        
+        if return_details:
+            reward_info = {
+                "accuracy": -99.0,
+                "valid": False,
+                "error": str(e),
+                "turn_count": 0
+            }
+            details = {
+                "test_id": original_test_entry.get("id", "unknown"),
+                "error": str(e),
+                "exception_type": type(e).__name__,
+                "original_test_entry": original_test_entry
+            }
+            return -99.0, reward_info, details
+        else:
+            raise Exception(error_msg)

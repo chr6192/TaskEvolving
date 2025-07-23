@@ -5,7 +5,7 @@ GPUS=2
 ray start --head --node-ip-address 127.0.0.1 --num-gpus $GPUS
 
 TASK_NAME="econml_bfcl"
-MODEL_NAME="Qwen3-8B"
+MODEL_NAME="Qwen3-4B"
 CURRENT_DATE=$(date +"%Y%m%d-%H%M%S")
 ROLLOUT_N=4
 
@@ -80,7 +80,7 @@ ray job submit --address="http://127.0.0.1:8265" \
     actor_rollout_ref.rollout.name=$rollout_name \
     actor_rollout_ref.rollout.mode=$rollout_mode \
     actor_rollout_ref.rollout.multi_turn.enable=True \
-    actor_rollout_ref.rollout.multi_turn.max_turns=10 \
+    actor_rollout_ref.rollout.multi_turn.max_turns=20 \
     actor_rollout_ref.rollout.multi_turn.format=hermes \
     actor_rollout_ref.rollout.multi_turn.completion_callback="$COMPLETION_CALLBACK" \
     actor_rollout_ref.rollout.multi_turn.tool_config_path="$TOOL_CONFIG_PATH" \
@@ -90,7 +90,7 @@ ray job submit --address="http://127.0.0.1:8265" \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console','swanlab'] \
     trainer.project_name="$TASK_NAME" \
     trainer.experiment_name="$MODEL_NAME-$CURRENT_DATE-n$ROLLOUT_N" \
     trainer.val_before_train=True \

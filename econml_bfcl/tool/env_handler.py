@@ -4,6 +4,7 @@ from typing import Dict, List, Any, Optional, Union
 import warnings
 import tempfile
 from pathlib import Path
+from bfcl.model_handler.api_inference.openai import OpenAIHandler
 from bfcl.eval_checker.multi_turn_eval.multi_turn_utils import (
     execute_multi_turn_func_call,
     is_empty_execute_response,
@@ -56,9 +57,10 @@ class EnvHandler:
             model_name.replace("/", "_").replace("-", "_").replace(".", "_")
         )
         self.model_style = ModelStyle.OpenAI
+        
 
     def interact(
-            self, messages: List[Dict[str, Any]], test_entry: Dict[str, Any], **kwargs
+        self, messages: List[Dict[str, Any]], test_entry: Dict[str, Any], **kwargs
     ) -> Dict[str, Any]:
         """
         Process one step in the conversation.
@@ -112,9 +114,7 @@ class EnvHandler:
         instance = cls()
         return instance.interact(messages, test_entry, **kwargs)
 
-    def _get_current_turn(
-            self, messages: List[Dict[str, Any]], test_entry: Dict[str, Any]
-    ) -> int:
+    def _get_current_turn(self, messages: List[Dict[str, Any]], test_entry: Dict[str, Any]) -> int:
         """
         Get the current turn number in the conversation.
 
@@ -129,11 +129,11 @@ class EnvHandler:
         return len(user_messages)
 
     def _handle_tool_calls(
-            self,
-            tool_calls: List[Dict[str, Any]],
-            decoded_calls: list[str],
-            test_entry: Dict[str, Any],
-            current_turn: int,
+        self,
+        tool_calls: List[Dict[str, Any]],
+        decoded_calls: list[str],
+        test_entry: Dict[str, Any],
+        current_turn: int,
     ) -> Dict[str, Any]:
         """
         Handle tool calls from assistant.
@@ -153,17 +153,13 @@ class EnvHandler:
             involved_classes=test_entry["involved_classes"],
             model_name=self.model_name,
             test_entry_id=test_entry["id"],
-            long_context=(
-                    "long_context" in test_entry["id"] or "composite" in test_entry["id"]
-            ),
+            long_context=("long_context" in test_entry["id"] or "composite" in test_entry["id"]),
             is_evaL_run=False,
         )
 
         return self._create_tool_response(tool_calls, execution_results)
 
-    def _handle_user_turn(
-            self, test_entry: Dict[str, Any], current_turn: int
-    ) -> Dict[str, Any]:
+    def _handle_user_turn(self, test_entry: Dict[str, Any], current_turn: int) -> Dict[str, Any]:
         """
         Handle user turn by returning appropriate content from test_entry["question"].
         For non-first turns, processes user query and tools.
@@ -185,7 +181,7 @@ class EnvHandler:
                 test_entry["function"].extend(holdout_function[str(current_turn)])
                 tools = self._compile_tools(test_entry)
                 assert (
-                        len(questions[current_turn]) == 0
+                    len(questions[current_turn]) == 0
                 ), "Holdout turn should not have user message."
                 current_turn_message = [
                     {
@@ -202,9 +198,6 @@ class EnvHandler:
             return self._create_user_response(current_turn_message, tools)
 
         except Exception as e:
-            import traceback;
-            traceback.print_exc()
-            print(f"处理用户轮次时发生错误: {str(e)}")
             return self._create_error_response(f"处理用户轮次时发生错误: {str(e)}")
 
     def _compile_tools(self, test_entry: dict) -> list:
@@ -226,7 +219,7 @@ class EnvHandler:
         return tools
 
     def _convert_tool_calls_to_execution_format(
-            self, tool_calls: List[Dict[str, Any]]
+        self, tool_calls: List[Dict[str, Any]]
     ) -> List[str]:
         """
         Convert OpenAI format tool calls to execution format.
@@ -259,7 +252,7 @@ class EnvHandler:
         return execution_list
 
     def _create_tool_response(
-            self, tool_calls: List[Dict[str, Any]], execution_results: List[str]
+        self, tool_calls: List[Dict[str, Any]], execution_results: List[str]
     ) -> Dict[str, Any]:
         """
         Create response for tool calls.
@@ -284,7 +277,7 @@ class EnvHandler:
         return {"messages": tool_messages}
 
     def _create_user_response(
-            self, question_turn: List[Dict[str, Any]], tools: List[Dict[str, Any]]
+        self, question_turn: List[Dict[str, Any]], tools: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
         Create response containing user message.
@@ -341,7 +334,7 @@ class EnvHandler:
         """
         return default_decode_execute_prompting(result)
 
-    def evaluate(self, test_entry: Dict[str, Any]) -> Dict[str, Any]:
+    def evaluate(self, test_entry: Dict[str, Any], score_dir: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
         """
         Evaluate function for single test case.
 
@@ -360,10 +353,18 @@ class EnvHandler:
                     }
                 }
                 or directly the conversation_result dict
+            score_dir: Directory to save evaluation score files. If None, uses temporary directory.
 
         Returns:
             Evaluation results in format compatible with evaluate_task
         """
+
+        if score_dir is not None:
+            # Use persistent score directory
+            score_dir = Path(score_dir) if not isinstance(score_dir, Path) else score_dir
+            # Ensure the directory exists
+            score_dir.mkdir(parents=True, exist_ok=True)
+        
         try:
             conversation_result = test_entry
             original_test_entry = conversation_result.get("original_test_entry", {})
@@ -394,7 +395,7 @@ class EnvHandler:
 
             if is_relevance_or_irrelevance(category):
                 accuracy, total_count = self._eval_relevance_test(
-                    handler, model_result_data, prompt_data, model_name, category
+                    handler, model_result_data, prompt_data, model_name, category, score_dir
                 )
             else:
                 # Find the corresponding possible answer file
@@ -404,19 +405,17 @@ class EnvHandler:
                 if is_multi_turn(category):
                     accuracy, total_count = self._eval_multi_turn_test(
                         handler, model_result_data, prompt_data, possible_answer,
-                        model_name, category
+                        model_name, category, score_dir
                     )
                 else:
                     accuracy, total_count = self._eval_single_turn_test(
                         handler, model_result_data, prompt_data, possible_answer,
-                        model_name, category
+                        model_name, category, score_dir
                     )
             # print(f"model_result_data: {model_result_data}")
             # print(f"possible_answer: {possible_answer}") if possible_answer else None
 
             result = {
-                "model_result_data": model_result_data,
-                "possible_answer": possible_answer if possible_answer else None,
                 "valid": True,
                 "accuracy": accuracy,
                 "total_count": total_count,
@@ -433,8 +432,6 @@ class EnvHandler:
             return result
 
         except Exception as e:
-            import traceback;
-            traceback.print_exc()
             return self._create_eval_error_result(
                 f"Evaluation failed: {str(e)}",
                 test_entry.get("test_id", test_entry.get("conversation_result", {}).get("test_id", "unknown"))
@@ -461,7 +458,7 @@ class EnvHandler:
             "model_name": self.model_name
         }
 
-    def _eval_relevance_test(self, handler, model_result_data, prompt_data, model_name, test_category):
+    def _eval_relevance_test(self, handler, model_result_data, prompt_data, model_name, test_category, score_dir):
         """
         Evaluate relevance/irrelevance test.
 
@@ -471,12 +468,12 @@ class EnvHandler:
             prompt_data: Prompt data
             model_name: Name of the model
             test_category: Category of the test
+            score_dir: Directory to save evaluation score files. If None, uses temporary directory.
 
         Returns:
             Tuple of (accuracy, total_count)
         """
-        with tempfile.TemporaryDirectory() as temp_dir:
-            score_dir = Path(temp_dir)
+        if score_dir is not None:
             accuracy, total_count = relevance_file_runner(
                 handler=handler,
                 model_result=[model_result_data],
@@ -487,9 +484,22 @@ class EnvHandler:
             )
             self._capture_and_print_score_files(score_dir, model_name, test_category, "relevance")
             return accuracy, total_count
-
-    def _eval_multi_turn_test(self, handler, model_result_data, prompt_data, possible_answer, model_name,
-                              test_category):
+        else:
+            # Use temporary directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                score_dir = Path(temp_dir)
+                accuracy, total_count = relevance_file_runner(
+                    handler=handler,
+                    model_result=[model_result_data],
+                    prompt=prompt_data,
+                    model_name=model_name,
+                    test_category=test_category,
+                    score_dir=score_dir
+                )
+                self._capture_and_print_score_files(score_dir, model_name, test_category, "relevance")
+                return accuracy, total_count
+    
+    def _eval_multi_turn_test(self, handler, model_result_data, prompt_data, possible_answer, model_name, test_category, score_dir):
         """
         Evaluate multi-turn test.
 
@@ -500,12 +510,12 @@ class EnvHandler:
             possible_answer: Possible answer data
             model_name: Name of the model
             test_category: Category of the test
+            score_dir: Directory to save evaluation score files. If None, uses temporary directory.
 
         Returns:
             Tuple of (accuracy, total_count)
         """
-        with tempfile.TemporaryDirectory() as temp_dir:
-            score_dir = Path(temp_dir)
+        if score_dir is not None:
             accuracy, total_count = multi_turn_runner(
                 handler=handler,
                 model_result=[model_result_data],
@@ -517,9 +527,23 @@ class EnvHandler:
             )
             self._capture_and_print_score_files(score_dir, model_name, test_category, "multi_turn")
             return accuracy, total_count
-
-    def _eval_single_turn_test(self, handler, model_result_data, prompt_data, possible_answer, model_name,
-                               test_category):
+        else:
+            # Use temporary directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                score_dir = Path(temp_dir)
+                accuracy, total_count = multi_turn_runner(
+                    handler=handler,
+                    model_result=[model_result_data],
+                    prompt=prompt_data,
+                    possible_answer=possible_answer,
+                    model_name=model_name,
+                    test_category=test_category,
+                    score_dir=score_dir
+                )
+                self._capture_and_print_score_files(score_dir, model_name, test_category, "multi_turn")
+                return accuracy, total_count
+    
+    def _eval_single_turn_test(self, handler, model_result_data, prompt_data, possible_answer, model_name, test_category, score_dir):
         """
         Evaluate single-turn AST test.
 
@@ -530,6 +554,7 @@ class EnvHandler:
             possible_answer: Possible answer data
             model_name: Name of the model
             test_category: Category of the test
+            score_dir: Directory to save evaluation score files. If None, uses temporary directory.
 
         Returns:
             Tuple of (accuracy, total_count)
@@ -539,9 +564,8 @@ class EnvHandler:
             language = "Java"
         elif "js" in test_category.lower() or "javascript" in test_category.lower():
             language = "JavaScript"
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            score_dir = Path(temp_dir)
+        
+        if score_dir is not None:
             accuracy, total_count = ast_file_runner(
                 handler=handler,
                 model_result=[model_result_data],
@@ -554,6 +578,22 @@ class EnvHandler:
             )
             self._capture_and_print_score_files(score_dir, model_name, test_category, "single_turn")
             return accuracy, total_count
+        else:
+            # Use temporary directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                score_dir = Path(temp_dir)
+                accuracy, total_count = ast_file_runner(
+                    handler=handler,
+                    model_result=[model_result_data],
+                    prompt=prompt_data,
+                    possible_answer=possible_answer,
+                    language=language,
+                    test_category=test_category,
+                    model_name=model_name,
+                    score_dir=score_dir
+                )
+                self._capture_and_print_score_files(score_dir, model_name, test_category, "single_turn")
+                return accuracy, total_count
 
     def _capture_and_print_score_files(self, score_dir: Path, model_name: str, test_category: str, eval_type: str):
         """
@@ -579,9 +619,8 @@ class EnvHandler:
                     try:
                         with open(file_path, 'r', encoding='utf-8') as f:
                             content = f.read()
-
-                        if file_path.suffix == '.json' or content.strip().startswith('{') or content.strip().startswith(
-                                '['):
+                            
+                        if file_path.suffix == '.json' or content.strip().startswith('{') or content.strip().startswith('['):
                             try:
                                 import json
                                 lines = content.strip().split('\n')
@@ -607,7 +646,7 @@ class EnvHandler:
             print(f"Error capturing evaluation result files: {str(e)}")
 
     def _convert_conversation_to_eval_format(
-            self, conversation_result: Dict[str, Any], original_test_entry: Dict[str, Any]
+        self, conversation_result: Dict[str, Any], original_test_entry: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         Convert conversation history to evaluation format.
@@ -735,10 +774,11 @@ class EnvHandler:
 
 
 def env_step(
-        messages: List[Dict[str, Any]],
-        test_entry: Dict[str, Any],
-        model: str = "env-handler",
-        **kwargs,
+    messages: List[Dict[str, Any]],
+    test_entry: Dict[str, Any],
+    model: str = "env-handler",
+    score_dir: Optional[Union[str, Path]] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """
     Simplified interface for environment chat completion.
@@ -747,6 +787,7 @@ def env_step(
         messages: List of conversation messages
         test_entry: Test entry containing conversation data
         model: Model name
+        score_dir: Directory to save evaluation score files. If None, uses temporary directory.
         **kwargs: Additional arguments
 
     Returns:
@@ -754,822 +795,3 @@ def env_step(
     """
     handler = EnvHandler(model)
     return handler.interact(messages, test_entry, **kwargs)
-
-
-if __name__ == "__main__":
-    messages = [
-        {
-            "role": "user",
-            "content": "Hey there, I constructed a file titled 'project_plan.md' that resides happily in my workspace directory. Could you be so kind as to rename it to project_overview.md.",
-            "tool_calls": None
-        },
-        {
-            "role": "assistant",
-            "content": "<think>\nOkay, the user wants to rename their existing file 'project_plan.md' to 'project_overview.md'. Let me check the available tools. There's a function called 'rename' in the Gorilla file system. The parameters required are the old and new file names. The user provided both, so I need to call the rename function with those arguments. I'll make sure to use the correct JSON structure for the tool call.\n</think>\n\n<tool_call>\n{\"name\": \"rename\", \"arguments\": {\"file_name\": \"project_plan.md\", \"new_file_name\": \"project_overview.md\"}}\n</tool_call>",
-            "tool_calls": None
-        }
-    ]
-
-    test_entry = {
-        "id": "multi_turn_base_27",
-        "question": [
-            [
-                {
-                    "role": "user",
-                    "content": "Hey there, I constructed a file titled 'project_plan.md' that resides happily in my workspace directory. Could you be so kind as to rename it to project_overview.md.",
-                }
-            ],
-            [
-                {
-                    "role": "user",
-                    "content": "In light of new developments with respect to file management, I've come across an urgent conundrum: servers are down unexpectedly. Draft a support ticket, with description 'Initial project plan details.' highlighting this dilemma and assign it a priority level of 3 to hasten the response rate. Title 'emergency' and use the previous file content as description. Here is my credential. Please use it user name tech_guru, password securePass123",
-                }
-            ],
-            [
-                {
-                    "role": "user",
-                    "content": "We've unearthed additional insights concerning the server issue. Please create a new ticket with same title and description 'Additional insights.' but now with priority to a level 5, ensuring it's handled promptly.",
-                }
-            ],
-        ],
-        "initial_config": {
-            "GorillaFileSystem": {
-                "root": {
-                    "alex": {
-                        "type": "directory",
-                        "contents": {
-                            "workspace": {
-                                "type": "directory",
-                                "contents": {
-                                    "project_plan.md": {
-                                        "type": "file",
-                                        "content": "Initial project plan details.",
-                                    }
-                                },
-                            }
-                        },
-                    }
-                }
-            },
-            "TicketAPI": {
-                "ticket_queue": [
-                    {
-                        "id": 12,
-                        "description": "Servers are down unexpectedly.",
-                        "priority": 3,
-                    }
-                ]
-            },
-        },
-        "path": [
-            "GorillaFileSystem.touch",
-            "GorillaFileSystem.cp",
-            "GorillaFileSystem.rm",
-            "TicketAPI.create_ticket",
-            "TicketAPI.edit_ticket",
-        ],
-        "involved_classes": ["TicketAPI", "GorillaFileSystem"],
-        "function": [
-            {
-                "name": "close_ticket",
-                "description": "This tool belongs to the ticketing system that is part of a company, which allows users to create, view, and manage support business tickets. Tool description: Close a ticket. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "ticket_id": {
-                            "type": "integer",
-                            "description": "ID of the ticket to be closed. ",
-                        }
-                    },
-                    "required": ["ticket_id"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "status": {
-                            "type": "string",
-                            "description": "Status of the close operation.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "create_ticket",
-                "description": "This tool belongs to the ticketing system that is part of a company, which allows users to create, view, and manage support business tickets. Tool description: Create a ticket in the system and queue it. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "Title of the ticket.",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Description of the ticket. Defaults to an empty string.",
-                            "default": "",
-                        },
-                        "priority": {
-                            "type": "integer",
-                            "description": "Priority of the ticket, from 1 to 5. Defaults to 1. 5 is the highest priority. ",
-                            "default": 1,
-                        },
-                    },
-                    "required": ["title"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "id": {
-                            "type": "integer",
-                            "description": "Unique identifier of the ticket.",
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Title of the ticket.",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Description of the ticket.",
-                        },
-                        "status": {
-                            "type": "string",
-                            "description": "Current status of the ticket.",
-                        },
-                        "priority": {
-                            "type": "integer",
-                            "description": "Priority level of the ticket.",
-                        },
-                    },
-                },
-            },
-            {
-                "name": "edit_ticket",
-                "description": "This tool belongs to the ticketing system that is part of a company, which allows users to create, view, and manage support business tickets. Tool description: Modify the details of an existing ticket. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "ticket_id": {
-                            "type": "integer",
-                            "description": "ID of the ticket to be changed.",
-                        },
-                        "updates": {
-                            "type": "dict",
-                            "description": "Dictionary containing the fields to be updated. - title (str) : [Optional] New title for the ticket. ",
-                            "properties": {
-                                "description": {
-                                    "type": "string",
-                                    "description": "New description for the ticket.",
-                                },
-                                "status": {
-                                    "type": "string",
-                                    "description": "New status for the ticket.",
-                                },
-                                "priority": {
-                                    "type": "integer",
-                                    "description": "New priority for the ticket.",
-                                },
-                            },
-                        },
-                    },
-                    "required": ["ticket_id", "updates"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "status": {
-                            "type": "string",
-                            "description": "Status of the update operation.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "get_ticket",
-                "description": "This tool belongs to the ticketing system that is part of a company, which allows users to create, view, and manage support business tickets. Tool description: Get a specific ticket by its ID. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "ticket_id": {
-                            "type": "integer",
-                            "description": "ID of the ticket to retrieve. ",
-                        }
-                    },
-                    "required": ["ticket_id"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "id": {
-                            "type": "integer",
-                            "description": "Unique identifier of the ticket.",
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Title of the ticket.",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Description of the ticket.",
-                        },
-                        "status": {
-                            "type": "string",
-                            "description": "Current status of the ticket.",
-                        },
-                        "priority": {
-                            "type": "integer",
-                            "description": "Priority level of the ticket.",
-                        },
-                        "created_by": {
-                            "type": "string",
-                            "description": "Username of the ticket creator.",
-                        },
-                    },
-                },
-            },
-            {
-                "name": "get_user_tickets",
-                "description": "This tool belongs to the ticketing system that is part of a company, which allows users to create, view, and manage support business tickets. Tool description: Get all tickets created by the current user, optionally filtered by status. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "status": {
-                            "type": "string",
-                            "description": "Status to filter tickets by. If None, return all tickets. ",
-                            "default": "None",
-                        }
-                    },
-                    "required": [],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "id": {
-                            "type": "integer",
-                            "description": "Unique identifier of the ticket.",
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Title of the ticket.",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Description of the ticket.",
-                        },
-                        "status": {
-                            "type": "string",
-                            "description": "Current status of the ticket.",
-                        },
-                        "priority": {
-                            "type": "integer",
-                            "description": "Priority level of the ticket.",
-                        },
-                        "created_by": {
-                            "type": "string",
-                            "description": "Username of the ticket",
-                        },
-                    },
-                },
-            },
-            {
-                "name": "logout",
-                "description": "This tool belongs to the ticketing system that is part of a company, which allows users to create, view, and manage support business tickets. Tool description: Log out the current user. Note that the provided function is in Python 3 syntax.",
-                "parameters": {"type": "dict", "properties": {}, "required": []},
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "success": {
-                            "type": "boolean",
-                            "description": "True if logout was successful, False otherwise.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "resolve_ticket",
-                "description": "This tool belongs to the ticketing system that is part of a company, which allows users to create, view, and manage support business tickets. Tool description: Resolve a ticket with a resolution. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "ticket_id": {
-                            "type": "integer",
-                            "description": "ID of the ticket to be resolved.",
-                        },
-                        "resolution": {
-                            "type": "string",
-                            "description": "Resolution details for the ticket. ",
-                        },
-                    },
-                    "required": ["ticket_id", "resolution"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "status": {
-                            "type": "string",
-                            "description": "Status of the resolve operation.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "ticket_get_login_status",
-                "description": "This tool belongs to the ticketing system that is part of a company, which allows users to create, view, and manage support business tickets. Tool description: Get the username of the currently authenticated user. Note that the provided function is in Python 3 syntax.",
-                "parameters": {"type": "dict", "properties": {}, "required": []},
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "username": {
-                            "type": "boolean",
-                            "description": "True if a user is logged in, False otherwise.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "ticket_login",
-                "description": "This tool belongs to the ticketing system that is part of a company, which allows users to create, view, and manage support business tickets. Tool description: Authenticate a user for ticket system. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "username": {
-                            "type": "string",
-                            "description": "Username of the user.",
-                        },
-                        "password": {
-                            "type": "string",
-                            "description": "Password of the user. ",
-                        },
-                    },
-                    "required": ["username", "password"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "success": {
-                            "type": "boolean",
-                            "description": "True if login was successful, False otherwise.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "cat",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Display the contents of a file of any extension from currrent directory. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "description": "The name of the file from current directory to display. No path is allowed. ",
-                        }
-                    },
-                    "required": ["file_name"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "file_content": {
-                            "type": "string",
-                            "description": "The content of the file.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "cd",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Change the current working directory to the specified folder. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "folder": {
-                            "type": "string",
-                            "description": "The folder of the directory to change to. You can only change one folder at a time. ",
-                        }
-                    },
-                    "required": ["folder"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "current_working_directory": {
-                            "type": "string",
-                            "description": "The new current working directory path.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "cp",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Copy a file or directory from one location to another.  If the destination is a directory, the source file or directory will be copied into the destination directory.  Both source and destination must be local to the current directory. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "source": {
-                            "type": "string",
-                            "description": "The name of the file or directory to copy.",
-                        },
-                        "destination": {
-                            "type": "string",
-                            "description": "The destination name to copy the file or directory to. If the destination is a directory, the source will be copied into this directory. No file paths allowed. ",
-                        },
-                    },
-                    "required": ["source", "destination"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "result": {
-                            "type": "string",
-                            "description": "The result of the copy operation or an error message if the operation fails.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "diff",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Compare two files of any extension line by line at the current directory. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "file_name1": {
-                            "type": "string",
-                            "description": "The name of the first file in current directory.",
-                        },
-                        "file_name2": {
-                            "type": "string",
-                            "description": "The name of the second file in current directorry. ",
-                        },
-                    },
-                    "required": ["file_name1", "file_name2"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "diff_lines": {
-                            "type": "string",
-                            "description": "The differences between the two files.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "du",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Estimate the disk usage of a directory and its contents. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "human_readable": {
-                            "type": "boolean",
-                            "description": "If True, returns the size in human-readable format (e.g., KB, MB). ",
-                            "default": False,
-                        }
-                    },
-                    "required": [],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "disk_usage": {
-                            "type": "string",
-                            "description": "The estimated disk usage.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "echo",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Write content to a file at current directory or display it in the terminal. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description": "The content to write or display.",
-                        },
-                        "file_name": {
-                            "type": "string",
-                            "description": "The name of the file at current directory to write the content to. Defaults to None. ",
-                            "default": "None",
-                        },
-                    },
-                    "required": ["content"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "terminal_output": {
-                            "type": "string",
-                            "description": "The content if no file name is provided, or None if written to file.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "find",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Find any file or directories under specific path that contain name in its file name.  This method searches for files of any extension and directories within a specified path that match the given name. If no name is provided, it returns all files and directories in the specified path and its subdirectories. Note: This method performs a recursive search through all subdirectories of the given path. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": 'The directory path to start the search. Defaults to the current directory (".").',
-                            "default": ".",
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "The name of the file or directory to search for. If None, all items are returned. ",
-                            "default": "None",
-                        },
-                    },
-                    "required": [],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "matches": {
-                            "type": "array",
-                            "description": "A list of matching file and directory paths relative to the given path.",
-                            "items": {"type": "string"},
-                        }
-                    },
-                },
-            },
-            {
-                "name": "grep",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Search for lines in a file of any extension at current directory that contain the specified pattern. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "description": "The name of the file to search. No path is allowed and you can only perform on file at local directory.",
-                        },
-                        "pattern": {
-                            "type": "string",
-                            "description": "The pattern to search for. ",
-                        },
-                    },
-                    "required": ["file_name", "pattern"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "matching_lines": {
-                            "type": "array",
-                            "description": "Lines that match the pattern.",
-                            "items": {"type": "string"},
-                        }
-                    },
-                },
-            },
-            {
-                "name": "ls",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: List the contents of the current directory. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "a": {
-                            "type": "boolean",
-                            "description": "Show hidden files and directories. Defaults to False. ",
-                            "default": False,
-                        }
-                    },
-                    "required": [],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "current_directory_content": {
-                            "type": "array",
-                            "description": "A list of the contents of the specified directory.",
-                            "items": {"type": "string"},
-                        }
-                    },
-                },
-            },
-            {
-                "name": "mkdir",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Create a new directory in the current directory. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "dir_name": {
-                            "type": "string",
-                            "description": "The name of the new directory at current directory. You can only create directory at current directory.",
-                        }
-                    },
-                    "required": ["dir_name"],
-                },
-                "response": {"type": "dict", "properties": {}},
-            },
-            {
-                "name": "mv",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Move a file or directory from one location to another. so Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "source": {
-                            "type": "string",
-                            "description": "Source name of the file or directory to move. Source must be local to the current directory.",
-                        },
-                        "destination": {
-                            "type": "string",
-                            "description": "The destination name to move the file or directory to. Destination must be local to the current directory and cannot be a path. If destination is not an existing directory like when renaming something, destination is the new file name. ",
-                        },
-                    },
-                    "required": ["source", "destination"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "result": {
-                            "type": "string",
-                            "description": "The result of the move operation.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "pwd",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Return the current working directory path. Note that the provided function is in Python 3 syntax.",
-                "parameters": {"type": "dict", "properties": {}, "required": []},
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "current_working_directory": {
-                            "type": "string",
-                            "description": "The current working directory path.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "rm",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Remove a file or directory. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "description": "The name of the file or directory to remove. ",
-                        }
-                    },
-                    "required": ["file_name"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "result": {
-                            "type": "string",
-                            "description": "The result of the remove operation.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "rmdir",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Remove a directory at current directory. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "dir_name": {
-                            "type": "string",
-                            "description": "The name of the directory to remove. Directory must be local to the current directory. ",
-                        }
-                    },
-                    "required": ["dir_name"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "result": {
-                            "type": "string",
-                            "description": "The result of the remove operation.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "sort",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Sort the contents of a file line by line. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "description": "The name of the file appeared at current directory to sort. ",
-                        }
-                    },
-                    "required": ["file_name"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "sorted_content": {
-                            "type": "string",
-                            "description": "The sorted content of the file.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "tail",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Display the last part of a file of any extension. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "description": "The name of the file to display. No path is allowed and you can only perform on file at local directory.",
-                        },
-                        "lines": {
-                            "type": "integer",
-                            "description": "The number of lines to display from the end of the file. Defaults to 10. ",
-                            "default": 10,
-                        },
-                    },
-                    "required": ["file_name"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "last_lines": {
-                            "type": "string",
-                            "description": "The last part of the file.",
-                        }
-                    },
-                },
-            },
-            {
-                "name": "touch",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Create a new file of any extension in the current directory. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "description": "The name of the new file in the current directory. file_name is local to the current directory and does not allow path.",
-                        }
-                    },
-                    "required": ["file_name"],
-                },
-                "response": {"type": "dict", "properties": {}},
-            },
-            {
-                "name": "wc",
-                "description": "This tool belongs to the Gorilla file system. It is a simple file system that allows users to perform basic file operations such as navigating directories, creating files and directories, reading and writing to files, etc. Tool description: Count the number of lines, words, and characters in a file of any extension from current directory. Note that the provided function is in Python 3 syntax.",
-                "parameters": {
-                    "type": "dict",
-                    "properties": {
-                        "file_name": {
-                            "type": "string",
-                            "description": "Name of the file of current directory to perform wc operation on.",
-                        },
-                        "mode": {
-                            "type": "string",
-                            "description": "Mode of operation ('l' for lines, 'w' for words, 'c' for characters). ",
-                            "default": "l",
-                        },
-                    },
-                    "required": ["file_name"],
-                },
-                "response": {
-                    "type": "dict",
-                    "properties": {
-                        "count": {
-                            "type": "integer",
-                            "description": "The count of the number of lines, words, or characters in the file.",
-                        },
-                        "type": {
-                            "type": "string",
-                            "description": 'The type of unit we are counting. [Enum]: ["lines", "words", "characters"]',
-                        },
-                    },
-                },
-            },
-        ],
-    }
-    env_handler = EnvHandler()
-    current_turn = env_handler._get_current_turn(messages, test_entry)
-    print(f"current_turn: {current_turn}")
-    if not messages:
-        print(f"xxx{env_handler._handle_user_turn(test_entry, current_turn)}")
-
-    if "tool_calls" in messages[-1] and messages[-1]["tool_calls"]:
-        try:
-            tool_calls = messages[-1]["tool_calls"]
-            decoded_calls = env_handler._convert_tool_calls_to_execution_format(tool_calls)
-            print(f"decoded_calls: {decoded_calls}")
-            # todo 实现decode_execute，返回prm
-            # if self.decode_execute(decoded_calls):
-            if env_handler.is_empty_execute_response(decoded_calls):
-                warnings.warn(f"is_empty_execute_response: {env_handler.is_empty_execute_response(decoded_calls)}")
-                print(env_handler._handle_user_turn(test_entry, current_turn))
-            print(env_handler._handle_tool_calls(
-                tool_calls, decoded_calls, test_entry, current_turn)
-            )
-        except Exception as e:
-            warnings.warn(f"处理工具调用时发生错误: {str(e)}")
-            print(env_handler._handle_user_turn(test_entry, current_turn))
-    else:
-        print(env_handler._handle_user_turn(test_entry, current_turn))

@@ -3,9 +3,11 @@ excludes: ["/.git/"]
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments: False"
-  WANDB_API_KEY: "***REMOVED***"
-  WANDB_BASE_URL: "http://REDACTED_INTERNAL_IP:8080"
+  # WANDB_API_KEY: "***REMOVED***"
+  # WANDB_BASE_URL: "http://REDACTED_INTERNAL_IP:8080"
   HYDRA_FULL_ERROR: "1"
   OPENAI_API_KEY: "xxx"
+  VLLM_USE_V1: "1"
+  SWANLAB_API_KEY: "xxx"
   # If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
   # VLLM_ATTENTION_BACKEND: "XFORMERS"

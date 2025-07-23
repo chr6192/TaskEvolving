@@ -173,13 +173,19 @@ class BfclRayPPOTrainer(RayPPOTrainer):
             if "tools_kwargs" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("tools_kwargs")
 
+            original_test_entry_backup = None
             if "original_test_entry" in test_batch.non_tensor_batch:
+                original_test_entry_backup = test_batch.non_tensor_batch["original_test_entry"].copy()
                 non_tensor_batch_keys_to_pop.append("original_test_entry")
 
             test_gen_batch = test_batch.pop(
                 batch_keys=batch_keys_to_pop,
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
             )
+            
+            # 将 original_test_entry 重新添加回 test_batch，确保奖励计算时可以访问
+            if original_test_entry_backup is not None:
+                test_batch.non_tensor_batch["original_test_entry"] = original_test_entry_backup
 
             test_gen_batch.meta_info = {
                 "eos_token_id": self.tokenizer.eos_token_id,
@@ -231,18 +237,29 @@ class BfclRayPPOTrainer(RayPPOTrainer):
             # 收集 messages 长度统计
             batch_messages = test_batch.non_tensor_batch.get("messages", [])
             
-            # 确保每个样本都有对应的 messages，如果没有就用空列表
             if len(batch_messages) > 0:
-                # 断言每个messages都是list
+                # 处理 messages，确保每个都是可迭代的（list 或 numpy array）
+                processed_messages = []
                 for i, messages in enumerate(batch_messages):
-                    assert isinstance(messages, list), f"messages[{i}] is not a list, got {type(messages)}"
+                    if isinstance(messages, np.ndarray):
+                        messages_list = messages.tolist()
+                        processed_messages.append(messages_list)
+                    elif isinstance(messages, list):
+                        processed_messages.append(messages)
+                    else:
+                        try:
+                            messages_list = list(messages)
+                            processed_messages.append(messages_list)
+                        except:
+                            # 如果转换失败，使用空列表
+                            processed_messages.append([])
                 
                 # 计算每个messages的长度并收集
-                batch_messages_lengths = [len(messages) for messages in batch_messages]
+                batch_messages_lengths = [len(messages) for messages in processed_messages]
                 all_messages_lengths.extend(batch_messages_lengths)
                 
                 # 收集所有的 messages
-                sample_messages.extend(batch_messages)
+                sample_messages.extend(processed_messages)
             else:
                 # 如果没有 messages，为每个样本添加空列表
                 num_samples = len(scores)  # scores 是当前 batch 的 scores
@@ -362,13 +379,19 @@ class BfclRayPPOTrainer(RayPPOTrainer):
                     non_tensor_batch_keys_to_pop.append("raw_prompt")
                 if "tools_kwargs" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("tools_kwargs")
+
+                original_test_entry_backup = None
                 if "original_test_entry" in batch.non_tensor_batch:
+                    original_test_entry_backup = batch.non_tensor_batch["original_test_entry"].copy()
                     non_tensor_batch_keys_to_pop.append("original_test_entry")
-                
+
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
                 )
+                
+                if original_test_entry_backup is not None:
+                    batch.non_tensor_batch["original_test_entry"] = original_test_entry_backup
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 
@@ -428,7 +451,7 @@ class BfclRayPPOTrainer(RayPPOTrainer):
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = DrRayPPOTrainer._compute_reward_async_with_details.remote(batch, self.config, self.tokenizer)
+                            future_reward = BfclRayPPOTrainer._compute_reward_async_with_details.remote(batch, self.config, self.tokenizer)
                         else:
                             reward_tensor, reward_extra_infos_dict, all_details = self._compute_reward_with_details(batch, self.reward_fn)
 
@@ -586,12 +609,24 @@ class BfclRayPPOTrainer(RayPPOTrainer):
                 # collect messages length statistics
                 batch_messages = batch.non_tensor_batch.get("messages", [])
                 if len(batch_messages) > 0:
-                    # 断言每个messages都是list
+                    # 处理 messages，确保每个都是可迭代的（list 或 numpy array）
+                    processed_messages = []
                     for i, messages in enumerate(batch_messages):
-                        assert isinstance(messages, list), f"messages[{i}] is not a list, got {type(messages)}"
+                        if isinstance(messages, np.ndarray):
+                            messages_list = messages.tolist()
+                            processed_messages.append(messages_list)
+                        elif isinstance(messages, list):
+                            processed_messages.append(messages)
+                        else:
+                            try:
+                                messages_list = list(messages)
+                                processed_messages.append(messages_list)
+                            except:
+                                # 如果转换失败，使用空列表
+                                processed_messages.append([])
                     
                     # 计算每个messages的长度
-                    messages_lengths = [len(messages) for messages in batch_messages]
+                    messages_lengths = [len(messages) for messages in processed_messages]
                     
                     if messages_lengths:
                         # 统计最大、最小、平均和中位数

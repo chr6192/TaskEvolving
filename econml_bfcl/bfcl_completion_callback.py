@@ -24,14 +24,39 @@ from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.workers.rollout.chat_scheduler import CompletionCallback
 
+from econml_bfcl.tool.env_handler import EnvHandler
+
+
 logger = logging.getLogger(__file__)
 
 
 class BfclCompletionCallback(CompletionCallback):
     def __init__(self, config: DictConfig, scheduler: "ChatCompletionScheduler"):
         super().__init__(config, scheduler)
-
+        
+        # 使用基类中已有的tools映射作为_tool_map
+        self._tool_map = self.tools
+        
         # TODO: add reward manager to calculate reward score once a sample finish
+
+    @property
+    def tool_schemas(self):
+        """OpenAI JSON tool schemas."""
+        return self._tool_schemas
+    
+    def get_tool_schemas_for_request(self, tools_kwargs=None):
+        """获取请求特定的tool schemas.
+        
+        Args:
+            tools_kwargs: Dict containing tool names as keys. If provided, only return schemas for these tools.
+                         If None, return all available tool schemas.
+        """
+        if tools_kwargs is not None:
+            # 动态返回指定工具的schemas，类似于sglang_rollout.py中的逻辑
+            return [self._tool_map[k].get_openai_tool_schema().model_dump(exclude_unset=True, exclude_none=True) for k in tools_kwargs.keys()]
+        else:
+            # 返回所有工具的schemas（向后兼容）
+            return self._tool_schemas
 
     async def __call__(self, messages: List[Dict[str, str]], completions: ChatCompletion, info: Dict[str, Any]):
         message = completions.choices[0].message.model_dump(exclude_unset=True, exclude_none=True)
@@ -45,48 +70,79 @@ class BfclCompletionCallback(CompletionCallback):
             print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] Reach max turns, done!\n{message}")
             return
 
-        # STEP 1: check if the model called tools
-        if finish_reason != "tool_calls":
-            print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] No tool called, done!\n{message}")
-            return
+        # # STEP 1: check if the model called tools
+        # if finish_reason != "tool_calls":
+        #     print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] No tool called, done!\n{message}")
+        #     return
 
         # STEP 2: call tools
         tool_calls = completions.choices[0].message.tool_calls
         print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] Call {len(tool_calls)} tools")
-        tasks = []
-        for tool_call in tool_calls:
-            tasks.append(self._call_tool(tool_call))
-        tool_responses = await asyncio.gather(*tasks)
-        if any(isinstance(item, Exception) for item in tool_responses):
-            print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] Error when calling tools, done!")
-            return
-        messages.extend(tool_responses)
 
-        print(f"[id={completions.id},turn={len(messages)}, tool_calls: {tool_calls}, tool_responses: {tool_responses}]\nmessage: {message}")
+        # tasks = []
+        # for tool_call in tool_calls:
+        #     assert "original_test_entry" in test_entry, f"original_test_entry is not found for index {test_entry}"
+        #     # 从info中获取test_entry，如果没有则使用空字典
+        #     test_entry = info.get("original_test_entry", {})
+        #     tasks.append(self._call_tool(tool_call, messages, test_entry))
+        # tool_responses = await asyncio.gather(*tasks)
+
+        test_entry = info.get("original_test_entry", {})
+
+        env_messages = EnvHandler.interact_from_class(messages, test_entry)
+        env_messages = env_messages["messages"]
+        
+        if any(isinstance(item, Exception) for item in env_messages):
+            logger.error(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] Error when calling bfcl env, done!")
+            return
+        messages.extend(env_messages)
+
+        if env_messages[-1]["role"] == "tool":
+            print(f"[id={completions.id},turn={len(messages)}, tool_calls: {tool_calls}, tool_responses: {env_messages}]")
+        elif env_messages[-1]["role"] == "user":
+            print(f"[id={completions.id},turn={len(messages)}, tool_calls: {tool_calls}, user_responses: {env_messages}]")
+        elif env_messages[-1]["role"] == "env":
+            print(f"[id={completions.id},turn={len(messages)}, tool_calls: {tool_calls}, env_responses: {env_messages}]")
+        else:
+            logger.error(f"[Unknown env message, done!][id={completions.id},turn={len(messages)},finish_reason={finish_reason}] Unknown env message:{env_messages}")
+
+        if finish_reason != "tool_calls" and env_messages[-1]["role"] == "env":
+            print(f"[id={completions.id},turn={len(messages)},finish_reason={finish_reason}] No tool called, and conversation done!\n{message}")
+            return
 
         # STEP 3: resubmit completion request with tool responses
         self.scheduler.submit_chat_completions(messages=messages, request_id=completions.id, info=info)
 
-    async def _call_tool(self, tool_call) -> Dict[str, str]:
-        """Call tool and return tool response."""
-        tool_name = tool_call.function.name
-        tool_args = json.loads(tool_call.function.arguments)
-        tool = self.tools[tool_name]
+    # async def _call_tool(self, tool_call, messages: List[Dict[str, str]], test_entry: Dict[str, Any]) -> Dict[str, str]:
+    #     """Call tool and return tool response."""
+    #     # tool_name = tool_call.function.name
+    #     # tool_args = json.loads(tool_call.function.arguments)
+    #     # tool = self.tools[tool_name]
 
-        instance_id = await tool.create()
-        try:
-            tool_response, tool_reward_score, tool_metrics = await tool.execute(instance_id, tool_args)
-        except Exception as e:
-            logger.exception(f"Error when executing tool: {e}")
-            return e
-        finally:
-            await tool.release(instance_id)
+    #     # instance_id = await tool.create()
+    #     try:
+    #         full_messages = messages.copy()
 
-        return {
-            "role": "tool",
-            "content": tool_response,
-            "tool_call_id": tool_call.id,
-        }
+    #         tool_results = await tool.execute(instance_id, full_messages, test_entry)
+            
+    #         if isinstance(tool_results, list) and len(tool_results) > 0:
+    #             tool_response, tool_reward_score, tool_metrics = tool_results[0]
+    #         else:
+    #             tool_response = "No response from tool"
+    #             tool_reward_score = 0.0
+    #             tool_metrics = {"error": "empty_response"}
+                
+    #     except Exception as e:
+    #         logger.exception(f"Error when executing tool: {e}")
+    #         return e
+    #     finally:
+    #         await tool.release(instance_id)
+
+    #     return {
+    #         "role": "tool",
+    #         "content": tool_response,
+    #         "tool_call_id": tool_call.id,
+    #     }
 
     def postprocess(self, batch: DataProto, batch_conversations: List[List[Dict[str, str]]], n: int) -> DataProto:
         # NOTE: consistent with batch version of generate_sequences in vllm_rollout_spmd.py
@@ -97,11 +153,29 @@ class BfclCompletionCallback(CompletionCallback):
         # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
 
         # prompts: [prompt] from input dataset
-        prompts = [self.tokenizer.apply_chat_template(prompt, tools=self.tool_schemas, add_generation_prompt=True, tokenize=False) for prompt in batch.non_tensor_batch["raw_prompt"]]
+        # 为每个样本动态获取对应的tool_schemas
+        prompts = []
+        for i, prompt in enumerate(batch.non_tensor_batch["raw_prompt"]):
+            if "tools_kwargs" in batch.non_tensor_batch:
+                tools_kwargs = batch.non_tensor_batch["tools_kwargs"][i]
+                tool_schemas = self.get_tool_schemas_for_request(tools_kwargs)
+            else:
+                tool_schemas = self.get_tool_schemas_for_request()
+            prompts.append(self.tokenizer.apply_chat_template(prompt, tools=tool_schemas, add_generation_prompt=True, tokenize=False))
+        
         assert len(batch_conversations) == len(prompts) * n
 
         # sequences: [prompt + response]
-        sequences = [self.tokenizer.apply_chat_template(conversation, tools=self.tool_schemas, add_generation_prompt=False, tokenize=False) for conversation in batch_conversations]
+        # 为每个对话动态获取对应的tool_schemas
+        sequences = []
+        for i, conversation in enumerate(batch_conversations):
+            batch_idx = i // n  # 获取对应的batch索引
+            if "tools_kwargs" in batch.non_tensor_batch:
+                tools_kwargs = batch.non_tensor_batch["tools_kwargs"][batch_idx]
+                tool_schemas = self.get_tool_schemas_for_request(tools_kwargs)
+            else:
+                tool_schemas = self.get_tool_schemas_for_request()
+            sequences.append(self.tokenizer.apply_chat_template(conversation, tools=tool_schemas, add_generation_prompt=False, tokenize=False))
 
         # responses: [response]
         responses = [sequence[len(prompts[i // n]) :] for i, sequence in enumerate(sequences)]

@@ -40,36 +40,36 @@ class BfclTool(BaseTool):
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
         return self.tool_schema
 
-    # from typing import List, Dict, Any
-    # async def execute(self, instance_id: str, messages: List[Dict[str, Any]], test_entry: Dict[str, Any], **kwargs) -> Tuple[str, float, dict]:
-    #     """Execute the tool by interacting with EnvHandler.
-    #
-    #     Args:
-    #         instance_id: The instance id of the tool
-    #         messages: The messages passed from the function call
-    #         test_entry: The test entry passed from the function call
-    #     """
-    #     assert test_entry is not None, "test_entry is required"
-    #     env_messages = self._env_handler.interact(messages, test_entry)
-    #     env_messages = env_messages["messages"]
-    #     # 提取最后连续的tool消息内容
-    #     tool_contents = []
-    #     try:
-    #         for msg in reversed(env_messages):
-    #             if msg.get("role") == "tool":
-    #                 tool_contents.insert(0, msg.get("content", ""))
-    #             else:
-    #                 break
-    #     except Exception as e:
-    #         print(f"Error in execute: {str(e)}\nenv_messages: {env_messages}")
-    #         raise e
-    #
-    #     metrics = {
-    #         "status": "success",
-    #         "message_count": len(env_messages)
-    #     }
-    #
-    #     return [(tool_content, 0.0, metrics) for tool_content in tool_contents]
+    from typing import List, Dict, Any
+    async def execute(self, instance_id: str, messages: List[Dict[str, Any]], test_entry: Dict[str, Any], **kwargs) -> Tuple[str, float, dict]:
+        """Execute the tool by interacting with EnvHandler.
+    
+        Args:
+            instance_id: The instance id of the tool
+            messages: The messages passed from the function call
+            test_entry: The test entry passed from the function call
+        """
+        assert test_entry is not None, "test_entry is required"
+        env_messages = self._env_handler.interact(messages, test_entry)
+        env_messages = env_messages["messages"]
+        # 提取最后连续的tool消息内容
+        tool_contents = []
+        try:
+            for msg in reversed(env_messages):
+                if msg.get("role") == "tool":
+                    tool_contents.insert(0, msg.get("content", ""))
+                else:
+                    break
+        except Exception as e:
+            print(f"Error in execute: {str(e)}\nenv_messages: {env_messages}")
+            raise e
+    
+        metrics = {
+            "status": "success",
+            "message_count": len(env_messages)
+        }
+    
+        return [(tool_content, 0.0, metrics) for tool_content in tool_contents]
         
     # async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> Tuple[str, float, dict]:
     #     """Execute the tool by interacting with EnvHandler.

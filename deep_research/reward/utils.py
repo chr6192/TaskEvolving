@@ -5,7 +5,13 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from rm_gallery.core.data.schema import DataOutput, DataSample, Step
-from rm_gallery.core.model.message import ChatMessage, ChatTool, MessageRole, Tool
+from rm_gallery.core.model.message import (
+    ChatMessage,
+    ChatTool,
+    MessageRole,
+    ChatTool,
+    Tool,
+)
 
 INVALID_REWARD = -0.01
 
@@ -121,10 +127,30 @@ def extract_assistant_group_messages(
     return result
 
 
-def convert_to_data_samples(group_messages) -> DataSample:
+def convert_tool_calls_format(msg: Dict[str, Any]) -> List[ChatTool]:
+    """将工具调用转换为 RM-Gallery 的 ChatTool 格式"""
+    tool_calls = msg.get("tool_calls")
+    if not tool_calls:  # 检查是否为None或空列表
+        return []
+
+    tool = [
+        ChatTool(
+            id=call["id"],
+            function=Tool(
+                arguments=call["function"]["arguments"],
+                name=call["function"]["name"],
+            ),
+            type=call["type"],
+        )
+        for call in tool_calls
+    ]
+    return tool
+
+
+def convert_to_data_samples(group_messages: List[List[dict]]) -> DataSample:
     """将group_messages 转换为 RM-Gallery 的 DataSample格式"""
-    # 创建输入消息（前两句话，包含system和user）
-    shared_input_messages = group_messages[0][:2]
+    # 创建输入消息，group_messages 第一句为 user
+    shared_input_messages = group_messages[0][:1]
 
     # 将共享输入转换为 ChatMessage 对象
     shared_input = []
@@ -141,7 +167,7 @@ def convert_to_data_samples(group_messages) -> DataSample:
     for i, messages in enumerate(group_messages):
         # 将当前组的所有消息转换为 ChatMessage 对象
         output_messages = []
-        for msg in messages[2:]:  # 跳过前两条共享输入消息
+        for msg in messages[1:]:  # 跳过第一条共享输入消息
             role = msg["role"]
             if role == "tool":
                 role = MessageRole.FUNCTION
@@ -149,7 +175,7 @@ def convert_to_data_samples(group_messages) -> DataSample:
                 ChatMessage(
                     role=role,
                     content=msg["content"],
-                    tool_calls=msg.get("tool_calls", []),
+                    tool_calls=convert_tool_calls_format(msg),
                 )
             )
 
@@ -166,7 +192,7 @@ def convert_to_data_samples(group_messages) -> DataSample:
                 content=msg.content,
                 tool_calls=msg.tool_calls,
             )
-            for msg in output_messages[2:]
+            for msg in output_messages
         ]
 
         output = DataOutput(answer=final_answer, steps=reasoning_steps)
@@ -178,5 +204,4 @@ def convert_to_data_samples(group_messages) -> DataSample:
         input=shared_input,
         output=outputs,
     )
-
     return sample

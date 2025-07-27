@@ -3,3 +3,4 @@ layotto
 rserving_client
 loguru
 tensorboard
+swanlab

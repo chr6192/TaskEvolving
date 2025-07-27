@@ -226,19 +226,30 @@ class DrRayPPOTrainer(RayPPOTrainer):
             
             # 收集 messages 长度统计
             batch_messages = test_batch.non_tensor_batch.get("messages", [])
-            
-            # 确保每个样本都有对应的 messages，如果没有就用空列表
+
             if len(batch_messages) > 0:
-                # 断言每个messages都是list
+                # 处理 messages，确保每个都是可迭代的（list 或 numpy array）
+                processed_messages = []
                 for i, messages in enumerate(batch_messages):
-                    assert isinstance(messages, list), f"messages[{i}] is not a list, got {type(messages)}"
-                
+                    if isinstance(messages, np.ndarray):
+                        messages_list = messages.tolist()
+                        processed_messages.append(messages_list)
+                    elif isinstance(messages, list):
+                        processed_messages.append(messages)
+                    else:
+                        try:
+                            messages_list = list(messages)
+                            processed_messages.append(messages_list)
+                        except:
+                            # 如果转换失败，使用空列表
+                            processed_messages.append([])
+
                 # 计算每个messages的长度并收集
-                batch_messages_lengths = [len(messages) for messages in batch_messages]
+                batch_messages_lengths = [len(messages) for messages in processed_messages]
                 all_messages_lengths.extend(batch_messages_lengths)
-                
+
                 # 收集所有的 messages
-                sample_messages.extend(batch_messages)
+                sample_messages.extend(processed_messages)
             else:
                 # 如果没有 messages，为每个样本添加空列表
                 num_samples = len(scores)  # scores 是当前 batch 的 scores
@@ -579,12 +590,24 @@ class DrRayPPOTrainer(RayPPOTrainer):
                 # collect messages length statistics
                 batch_messages = batch.non_tensor_batch.get("messages", [])
                 if len(batch_messages) > 0:
-                    # 断言每个messages都是list
+                    # 处理 messages，确保每个都是可迭代的（list 或 numpy array）
+                    processed_messages = []
                     for i, messages in enumerate(batch_messages):
-                        assert isinstance(messages, list), f"messages[{i}] is not a list, got {type(messages)}"
-                    
+                        if isinstance(messages, np.ndarray):
+                            messages_list = messages.tolist()
+                            processed_messages.append(messages_list)
+                        elif isinstance(messages, list):
+                            processed_messages.append(messages)
+                        else:
+                            try:
+                                messages_list = list(messages)
+                                processed_messages.append(messages_list)
+                            except:
+                                # 如果转换失败，使用空列表
+                                processed_messages.append([])
+
                     # 计算每个messages的长度
-                    messages_lengths = [len(messages) for messages in batch_messages]
+                    messages_lengths = [len(messages) for messages in processed_messages]
                     
                     if messages_lengths:
                         # 统计最大、最小、平均和中位数

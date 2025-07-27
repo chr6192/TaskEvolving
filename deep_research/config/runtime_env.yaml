@@ -8,6 +8,7 @@ env_vars:
   HYDRA_FULL_ERROR: "1"
   OPENAI_API_KEY: "xxx"
   TENSORBOARD_DIR: "/home/admin/logs/tfevent"
+  SWANLAB_API_KEY: "xxx"
   # If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
   # VLLM_ATTENTION_BACKEND: "XFORMERS"
     # WANDB_MODE: "offline"

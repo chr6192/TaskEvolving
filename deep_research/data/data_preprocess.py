@@ -9,9 +9,7 @@ import os
 import sys
 from typing import List, Optional
 
-# 添加当前目录到Python路径，这样可以直接导入同目录下的模块
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from prompt_v0702 import PROMPT
+from prompt_v0729 import PROMPT
 
 def preprocess_data(n: int = 1, tools_kwargs_empty: bool = True, output_date_suffix: str = None):
     """
@@ -26,14 +24,14 @@ def preprocess_data(n: int = 1, tools_kwargs_empty: bool = True, output_date_suf
         output_date_suffix = datetime.now().strftime("_%y%m%d")
     
     # 读取uid列表
-    with open('deep_research/uid.jsonl', 'r', encoding='utf-8') as f:
+    with open('deep_research/data/uid.jsonl', 'r', encoding='utf-8') as f:
         uid_list = json.load(f)
     
     # 读取工具配置
     tools_config = {}
     if not tools_kwargs_empty:
         try:
-            with open('/Users/chr/Dev/agentic-rl/deep_research/config/tool_config/dr_tool_config.yaml', 'r', encoding='utf-8') as f:
+            with open('deep_research/config/tool_config/dr_tool_config.yaml', 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
                 # 构建tools_kwargs格式
                 for tool_item in config.get('tools', []):
@@ -43,6 +41,9 @@ def preprocess_data(n: int = 1, tools_kwargs_empty: bool = True, output_date_suf
         except FileNotFoundError:
             print("工具配置文件未找到，使用默认search工具")
             tools_config = {"search": {"dummy_field": None}}
+    
+    # 用于去重的集合，存储query+uid组合
+    processed_combinations = set()
     
     # 处理训练和测试数据
     for dataset_type in ['train', 'test']:
@@ -61,6 +62,27 @@ def preprocess_data(n: int = 1, tools_kwargs_empty: bool = True, output_date_suf
             selected_uids = random.sample(uid_list, min(n, len(uid_list)))
             
             for uid in selected_uids:
+                # 先提取query用于去重检查
+                query = None
+                for msg in row['prompt']:
+                    if msg['role'] == 'user':
+                        query = msg['content'].split('。')[-1]
+                        break
+                
+                if query is None:
+                    continue  # 如果没有找到user消息，跳过
+                
+                # 创建query+uid组合的唯一标识
+                combination_key = f"{query}|{uid}"
+                
+                # 检查是否已处理过该组合
+                if combination_key in processed_combinations:
+                    print(f"跳过重复组合: query='{query[:50]}...' uid='{uid}'")
+                    continue
+                
+                # 添加到已处理集合
+                processed_combinations.add(combination_key)
+                
                 # 复制原始数据
                 new_row = row.copy()
                 
@@ -74,7 +96,6 @@ def preprocess_data(n: int = 1, tools_kwargs_empty: bool = True, output_date_suf
                         continue
                     elif msg['role'] == 'user':
                         # 在user content末尾添加uid信息
-                        query = msg['content'].split('。')[-1]
                         # msg['content'] += f"。用户的uid为{uid}。用户的问题为：{query}"
                         msg['content'] = PROMPT.format(uid=uid, query=query)
                         modified_prompt.append(msg)
@@ -95,7 +116,9 @@ def preprocess_data(n: int = 1, tools_kwargs_empty: bool = True, output_date_suf
         # 保存处理后的数据
         processed_df = pd.DataFrame(processed_data)
         processed_df.to_parquet(output_path, index=False)
-        print(f"已保存处理后的{dataset_type}数据到 {output_path}")
+        print(f"已保存处理后的{dataset_type}数据到 {output_path}，共 {len(processed_data)} 条记录")
+        
+    print(f"总共处理了 {len(processed_combinations)} 个唯一的query+uid组合")
 
 def create_custom_dataset(query_list: List[str], output_filename: str = None, n: int = 1, tools_kwargs_empty: bool = True):
     """

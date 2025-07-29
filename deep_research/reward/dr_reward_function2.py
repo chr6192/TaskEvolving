@@ -15,7 +15,7 @@ from deep_research.reward.utils import (
 from meta_info.rewards.express_reward import AsyncMapPeekModel, SyncMapPeekModel
 from meta_info.rewards.faithful_reward import AsyncMapFaithfulModel, SyncMapFaithfulModel
 from meta_info.rewards.finance_rule import MapFaithfulRuleBasedNumFilter, MapFormat
-from rm_gallery.gallery.rm.agent import create_agent_search_reward
+# from rm_gallery.gallery.rm.agent import create_agent_search_reward
 
 
 class HybridRewardExecutor:
@@ -196,7 +196,7 @@ async def compute_score_async(
     # step4: 注册CPU密集型任务（本地计算）
     num_filter_func = MapFaithfulRuleBasedNumFilter()
     format_func = MapFormat()
-    agent_search_reward = create_agent_search_reward()  # RM-Gallery的agent search reward
+    # agent_search_reward = create_agent_search_reward()  # RM-Gallery的agent search reward
 
     executor.add_cpu_task(
         "faithful_num_exist_reward",
@@ -205,7 +205,7 @@ async def compute_score_async(
         supply_contents,
     )
     executor.add_cpu_task("map_format_reward", format_func, assistant_contents, supply_contents)
-    executor.add_io_task("agent_search_reward", agent_search_reward.async_evaluate, sample)
+    # executor.add_io_task("agent_search_reward", agent_search_reward.async_evaluate, sample)
 
     # step5: 并行执行所有任务
     print("开始并行执行所有reward任务...")
@@ -232,10 +232,10 @@ async def compute_score_async(
     map_format_reward, format_details = unpack_result(results.get("map_format_reward", []), "format_score")
 
     # 处理agent_search_reward结果
-    agent_search_result = results.get("agent_search_reward")
-    agent_search_output_list = agent_search_result.output if agent_search_result else []
-    agent_search_reward_list = [output.answer.reward.score for output in agent_search_output_list]
-    agent_search_details = [output.answer.additional_kwargs for output in agent_search_output_list]
+    # agent_search_result = results.get("agent_search_reward")
+    # agent_search_output_list = agent_search_result.output if agent_search_result else []
+    # agent_search_reward_list = [output.answer.reward.score for output in agent_search_output_list]
+    # agent_search_details = [output.answer.additional_kwargs for output in agent_search_output_list]
 
     # step7: 校验reward长度
     expected_length = len(assistant_contents)
@@ -244,18 +244,18 @@ async def compute_score_async(
         "express_reward": express_reward,
         "faithful_num_exist_reward": faithful_num_exist_reward,
         "map_format_reward": map_format_reward,
-        "agent_search_reward": agent_search_reward_list,
+        # "agent_search_reward": agent_search_reward_list,
     }
     for reward_name, reward_list in reward_dict.items():
         assert len(reward_list) == expected_length, f"{reward_name}长度不正确: {len(reward_list)} != {expected_length}"
 
     # step8: 计算总分
     total_score = (
-        0.3 * torch.tensor(faithful_reward)
-        + 0.3 * torch.tensor(express_reward)
+        0.4 * torch.tensor(faithful_reward)
+        + 0.4 * torch.tensor(express_reward)
         + 0.1 * torch.tensor(faithful_num_exist_reward)
         + 0.1 * torch.tensor(map_format_reward)
-        + 0.2 * torch.tensor(agent_search_reward_list)
+        # + 0.2 * torch.tensor(agent_search_reward_list)
     ).tolist()
 
     reward_info = {k: v for k, v in reward_dict.items()}
@@ -287,7 +287,7 @@ async def compute_score_async(
             ("express_details", express_details),
             ("num_exist_details", num_exist_details),
             ("format_details", format_details),
-            ("agent_search_details", agent_search_details),
+            # ("agent_search_details", agent_search_details),
         ]
         for i in range(expected_length):
             detail = {

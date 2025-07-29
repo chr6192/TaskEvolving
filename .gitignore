@@ -116,7 +116,7 @@ ENV/
 *.lock
 
 # data
-*.parquet
+# *.parquet
 
 
 # local logs

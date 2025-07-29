@@ -4,3 +4,4 @@ rserving_client
 loguru
 tensorboard
 swanlab
+async_lru

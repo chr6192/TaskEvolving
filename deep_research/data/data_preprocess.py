@@ -120,6 +120,90 @@ def preprocess_data(n: int = 1, tools_kwargs_empty: bool = True, output_date_suf
         
     print(f"总共处理了 {len(processed_combinations)} 个唯一的query+uid组合")
 
+
+
+
+def preprocess_queries(n: int = 1, queries: list = None, output_fp: str=None, tools_kwargs_empty: bool = False):
+    """
+    数据预处理函数
+    
+    Args:
+        n: 控制随机获取uid的数量，当n>1时将数据复制n份
+        tools_kwargs_empty: 控制tools_kwargs是否为空
+        output_date_suffix: 输出文件日期后缀，如果为None则使用当前日期
+    """
+
+    # 读取uid列表
+    with open('deep_research/data/uid.jsonl', 'r', encoding='utf-8') as f:
+        uid_list = json.load(f)
+    
+    # 读取工具配置
+    tools_config = {}
+    if not tools_kwargs_empty:
+        try:
+            with open('deep_research/config/tool_config/dr_tool_config.yaml', 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+                # 构建tools_kwargs格式
+                for tool_item in config.get('tools', []):
+                    if 'tool_schema' in tool_item and 'function' in tool_item['tool_schema']:
+                        tool_name = tool_item['tool_schema']['function']['name']
+                        tools_config[tool_name] = {"dummy_field": None}
+        except FileNotFoundError:
+            print("工具配置文件未找到，使用默认search工具")
+            tools_config = {"search": {"dummy_field": None}}
+    
+    # 用于去重的集合，存储query+uid组合
+    processed_combinations = set()
+    
+
+    processed_data = []
+    
+    for query in queries:
+        # 随机选择uid
+        selected_uids = random.sample(uid_list, min(n, len(uid_list)))
+        
+        for uid in selected_uids:
+
+            # 创建query+uid组合的唯一标识
+            combination_key = f"{query}|{uid}"
+            
+            # 检查是否已处理过该组合
+            if combination_key in processed_combinations:
+                print(f"跳过重复组合: query='{query[:50]}...' uid='{uid}'")
+                continue
+            
+            # 添加到已处理集合
+            processed_combinations.add(combination_key)
+            
+            # 复制原始数据
+            new_row = {}
+            new_row['extra_info'] = {}
+            
+            new_row['extra_info']['uid'] = uid
+
+            new_row['prompt'] = [{"role":"user","content": PROMPT.format(uid=uid, query=query)}]
+            
+            # 修改tools_kwargs
+            if tools_kwargs_empty:
+                new_row['extra_info']['tools_kwargs'] = {}
+                new_row['extra_info']['need_tools_kwargs'] = False
+            else:
+                new_row['extra_info']['tools_kwargs'] = tools_config
+                new_row['extra_info']['need_tools_kwargs'] = True
+            
+            processed_data.append(new_row)
+    
+    # 保存处理后的数据
+    processed_df = pd.DataFrame(processed_data)
+    processed_df.to_parquet(output_fp, index=False)
+    print(f"已保存处理后的数据到 {output_fp}，共 {len(processed_data)} 条记录")
+    print(f"总共处理了 {len(processed_combinations)} 个唯一的query+uid组合")
+
+
+
+
+
+
 def create_custom_dataset(query_list: List[str], output_filename: str = None, n: int = 1, tools_kwargs_empty: bool = True):
     """
     创建自定义数据集
@@ -203,7 +287,7 @@ def create_custom_dataset(query_list: List[str], output_filename: str = None, n:
 # 示例使用
 if __name__ == "__main__":
     # 处理原始数据
-    preprocess_data(n=1, tools_kwargs_empty=False)
+    # preprocess_data(n=1, tools_kwargs_empty=False)
     
     # # 创建自定义数据集示例
     # custom_queries = [
@@ -211,3 +295,12 @@ if __name__ == "__main__":
     #     "易方达增强回报债券A基金购买有限额么？"
     # ]
     # create_custom_dataset(custom_queries, n=1, tools_kwargs_empty=False)
+
+    fp = '/ossfs/workspace/dr_test_25_7_30.xlsx'
+    df = pd.read_excel(fp)
+
+    output_date_suffix = datetime.now().strftime("_%y%m%d")
+
+    queries = df['query'].tolist()
+    print(f'总共样本数量为{len(queries)}')
+    preprocess_queries(n=1, queries=queries, output_fp=output_fp, tools_kwargs_empty=False)

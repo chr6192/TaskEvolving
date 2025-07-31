@@ -1,5 +1,3 @@
-
-
 import pandas as pd
 import json
 import random
@@ -121,7 +119,125 @@ def preprocess_data(n: int = 1, tools_kwargs_empty: bool = True, output_date_suf
     print(f"总共处理了 {len(processed_combinations)} 个唯一的query+uid组合")
 
 
+def preprocess_skeleton(n: int = 1, tools_kwargs_empty: bool = True, output_date_suffix: str = None):
+    """
+    数据预处理函数
+    
+    Args:
+        n: 控制随机获取uid的数量，当n>1时将数据复制n份
+        tools_kwargs_empty: 控制tools_kwargs是否为空
+        output_date_suffix: 输出文件日期后缀，如果为None则使用当前日期
+    """
+    if output_date_suffix is None:
+        output_date_suffix = datetime.now().strftime("_%y%m%d")
+    
+    # 读取uid列表
+    with open('deep_research/data/uid.jsonl', 'r', encoding='utf-8') as f:
+        uid_list = json.load(f)
+    
+    # 读取工具配置
+    tools_config = {}
+    if not tools_kwargs_empty:
+        try:
+            with open('deep_research/config/tool_config/dr_tool_config.yaml', 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+                # 构建tools_kwargs格式
+                for tool_item in config.get('tools', []):
+                    if 'tool_schema' in tool_item and 'function' in tool_item['tool_schema']:
+                        tool_name = tool_item['tool_schema']['function']['name']
+                        tools_config[tool_name] = {"dummy_field": None}
+        except FileNotFoundError:
+            print("工具配置文件未找到，使用默认search工具")
+            tools_config = {"search": {"dummy_field": None}}
+    
+    # 用于去重的集合，存储query+uid组合
+    processed_combinations = set()
+    
+            # 处理训练和测试数据
+    for dataset_type in ['train']:
+        input_path = f'deep_research/data/4k_w_skeleton/processed_multi_tool_result.json'
+        output_path = f'deep_research/data/4k_w_skeleton/{dataset_type}{output_date_suffix}.parquet'
+        
+        if not os.path.exists(input_path):
+            print(f"文件 {input_path} 不存在，跳过处理")
+            continue
+            
+        # 读取json文件
+        with open(input_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        processed_data = []
+        
+        for row in data:
+            if "analysis" not in row or "intent" not in row or "need_multi_step" not in row or "tool_calls_list" not in row:
+                continue
 
+            # 随机选择uid
+            selected_uids = random.sample(uid_list, min(n, len(uid_list)))
+            
+            for uid in selected_uids:
+                # 先提取query用于去重检查
+                query = row['query']
+                
+                if query is None:
+                    continue  # 如果没有找到user消息，跳过
+                
+                # 创建query+uid组合的唯一标识
+                combination_key = f"{query}|{uid}"
+                
+                # 检查是否已处理过该组合
+                if combination_key in processed_combinations:
+                    print(f"跳过重复组合: query='{query[:50]}...' uid='{uid}'")
+                    continue
+                
+                # 添加到已处理集合
+                processed_combinations.add(combination_key)
+                
+                # 复制原始数据
+                new_row = {}
+                new_row['data_source'] = "yiwen_processed_4k_w_skeleton_train"
+
+                new_row['prompt'] = [
+                    {
+                        "role": "user",
+                        "content": PROMPT.format(uid=uid, query=query)
+                    }
+                ]
+                skeleton = {}
+                skeleton['uid'] = uid
+                skeleton['query'] = query
+                skeleton['analysis'] = row['analysis']
+                skeleton['intent'] = row['intent']
+                skeleton['need_multi_step'] = row['need_multi_step']
+                # new_row['extra_info']['original_result'] = row['original_result']
+                skeleton['tool_calls_reference'] = json.dumps(row['tool_calls_list'], ensure_ascii=False)
+                
+                new_row['extra_info'] = {}
+                new_row['extra_info']['skeleton'] = skeleton
+                
+                # 修改tools_kwargs - 确保结构一致性
+                if tools_kwargs_empty:
+                    new_row['extra_info']['tools_kwargs'] = None  # 使用None而非空字典
+                    new_row['extra_info']['need_tools_kwargs'] = False
+                else:
+                    new_row['extra_info']['tools_kwargs'] = tools_config
+                    new_row['extra_info']['need_tools_kwargs'] = True
+                
+                processed_data.append(new_row)
+        
+        # 保存处理后的数据 - 规范化数据结构
+        processed_df = pd.DataFrame(processed_data)
+        
+        # 确保所有复杂对象字段类型一致
+        for i in range(len(processed_df)):
+            # 确保所有None值保持为None，避免混合类型
+            if processed_df.iloc[i]['extra_info']['tools_kwargs'] == {}:
+                processed_df.iloc[i]['extra_info']['tools_kwargs'] = None
+        
+        processed_df.to_parquet(output_path, index=False)
+        print(f"已保存处理后的{dataset_type}数据到 {output_path}，共 {len(processed_data)} 条记录")
+        
+    print(f"总共处理了 {len(processed_combinations)} 个唯一的query+uid组合")
 
 def preprocess_queries(n: int = 1, queries: list = None, output_fp: str=None, tools_kwargs_empty: bool = False):
     """
@@ -198,11 +314,6 @@ def preprocess_queries(n: int = 1, queries: list = None, output_fp: str=None, to
     processed_df.to_parquet(output_fp, index=False)
     print(f"已保存处理后的数据到 {output_fp}，共 {len(processed_data)} 条记录")
     print(f"总共处理了 {len(processed_combinations)} 个唯一的query+uid组合")
-
-
-
-
-
 
 def create_custom_dataset(query_list: List[str], output_filename: str = None, n: int = 1, tools_kwargs_empty: bool = True):
     """
@@ -284,11 +395,100 @@ def create_custom_dataset(query_list: List[str], output_filename: str = None, n:
     df.to_parquet(output_filename, index=False)
     print(f"已保存自定义数据集到 {output_filename}")
 
+def add_skeleton_to_parquet(input_path: str, output_path: str = None):
+        """
+        为指定路径的parquet文件中的每条数据增加一个空的skeleton字段
+        
+        Args:
+            input_path: 输入parquet文件路径
+            output_path: 输出parquet文件路径，如果为None则覆盖原文件
+        """
+        import pandas as pd
+        
+        if not os.path.exists(input_path):
+            print(f"文件 {input_path} 不存在")
+            return
+            
+        df = pd.read_parquet(input_path)
+
+        def extract_uid_and_query(row):
+            # 从extra_info中提取uid
+            uid = row.get('extra_info', {}).get('uid', '')
+            
+            # 从prompt中提取query
+            prompt_content = row.get('prompt', [])
+            query = ''
+            for msg in prompt_content:
+                if msg.get('role') == 'user':
+                    content = msg.get('content', '')
+                    # 提取"当前问题"后的内容
+                    if '当前问题：' in content:
+                        query = content.split('当前问题：')[-1].strip()
+                    elif '当前问题:' in content:
+                        query = content.split('当前问题:')[-1].strip()
+                    else:
+                        # 如果没有明确标记，取最后一段
+                        query = content.split('\n')[-1].strip()
+                    break
+            
+            skeleton = {
+                'uid': uid,
+                'query': query,
+                'analysis': '',
+                'intent': '',
+                'need_multi_step': False,
+                'tool_calls_reference': ""
+            }
+            
+            return skeleton
+        
+        def add_skeleton_and_remove_uid(row):
+            extra_info = row.get('extra_info', {}).copy()  # 创建副本避免修改原数据
+            
+            # 添加skeleton
+            skeleton = extract_uid_and_query(row)
+            extra_info['skeleton'] = skeleton
+            
+            # 移除uid
+            if isinstance(extra_info, dict) and 'uid' in extra_info:
+                extra_info.pop('uid', None)
+                
+            return extra_info
+        
+        df['extra_info'] = df.apply(add_skeleton_and_remove_uid, axis=1)
+
+        df['data_source'] = "shiyu_250730_241_test"
+
+        if output_path is None:
+            raise ValueError("output_path is required")
+
+        df = df[['data_source', 'prompt', 'extra_info']]
+
+        df.to_parquet(output_path, index=False)
+        print(f"已处理完成，共 {len(df)} 条记录，保存到 {output_path}")
+
+
 # 示例使用
 if __name__ == "__main__":
-    # 处理原始数据
     # preprocess_data(n=1, tools_kwargs_empty=False)
+   
+
+    ################################0729prompt+ shiyu 730提供的长难query=241条test################################
+
+    # fp = '/ossfs/workspace/dr_test_25_7_30.xlsx'
+    # df = pd.read_excel(fp)
+
+    # output_date_suffix = datetime.now().strftime("_%y%m%d")
+
+    # queries = df['query'].tolist()
+    # print(f'总共样本数量为{len(queries)}')
+    # preprocess_queries(n=1, queries=queries, output_fp=output_fp, tools_kwargs_empty=False)
+
+    ################################0729prompt+ yiwen处理后的4k条带skeleton = 4k条train################################
+    preprocess_skeleton(n=1, tools_kwargs_empty=False)
     
+    ################################other################################
+
     # # 创建自定义数据集示例
     # custom_queries = [
     #     "今年以来房地产板块下跌比较少的公司",
@@ -296,11 +496,3 @@ if __name__ == "__main__":
     # ]
     # create_custom_dataset(custom_queries, n=1, tools_kwargs_empty=False)
 
-    fp = '/ossfs/workspace/dr_test_25_7_30.xlsx'
-    df = pd.read_excel(fp)
-
-    output_date_suffix = datetime.now().strftime("_%y%m%d")
-
-    queries = df['query'].tolist()
-    print(f'总共样本数量为{len(queries)}')
-    preprocess_queries(n=1, queries=queries, output_fp=output_fp, tools_kwargs_empty=False)

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from functools import wraps
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -180,6 +181,8 @@ async def compute_score_async(
     failthful_contents = extract_packing_faithful(group_responses)
     assistant_contents = extract_assistant_group_messages(group_messages)
     sample = convert_to_data_samples(group_messages)  # 创建 sample 用于RM-Gallery的reward计算
+    group_extras = [_process_extra_info(extra) for extra in group_extras]
+    print(f"tool_calls_reference: {group_extras[0]['skeleton']['tool_calls_reference']}")
 
     print(f"数据预处理完成: {len(assistant_contents)} 个助手回复")
 
@@ -309,6 +312,17 @@ def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
     cleaned = {k: v for k, v in detail_dict.items() if not k.endswith("_tmp")}
     return cleaned
 
+def _process_extra_info(extra_info: Dict[str, Any]) -> Dict[str, Any]:
+    skeleton = extra_info.get("skeleton", {})
+    assert skeleton != {}, f"skeleton is not found for index {extra_info}"
+    if "tool_calls_reference" in skeleton and isinstance(skeleton["tool_calls_reference"], str):
+        try:
+            skeleton["tool_calls_reference"] = json.loads(skeleton["tool_calls_reference"])
+        except json.JSONDecodeError:
+            print(f"无法将tool_calls_reference从str解析为dict,保持原样: {skeleton['tool_calls_reference']}")
+
+    extra_info["skeleton"] = skeleton
+    return extra_info
 
 def compute_score(
     prompt: str,

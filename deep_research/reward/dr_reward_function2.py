@@ -198,12 +198,7 @@ async def compute_score_async(
     format_func = MapFormat()
     # agent_search_reward = create_agent_search_reward()  # RM-Gallery的agent search reward
 
-    executor.add_cpu_task(
-        "faithful_num_exist_reward",
-        num_filter_func,
-        assistant_contents,
-        supply_contents,
-    )
+    executor.add_cpu_task("faithful_num_exist_reward", num_filter_func, assistant_contents, supply_contents,)
     executor.add_cpu_task("map_format_reward", format_func, assistant_contents, supply_contents)
     # executor.add_io_task("agent_search_reward", agent_search_reward.async_evaluate, sample)
 
@@ -226,9 +221,7 @@ async def compute_score_async(
 
     faithful_reward, faithful_details = unpack_result(results.get("faithful_reward", ([], [])))
     express_reward, express_details = unpack_result(results.get("express_reward", ([], [])), "express_score")
-    faithful_num_exist_reward, num_exist_details = unpack_result(
-        results.get("faithful_num_exist_reward", []), "num_exist_score"
-    )
+    faithful_num_exist_reward, num_exist_details = unpack_result(results.get("faithful_num_exist_reward", []), "num_exist_score")
     map_format_reward, format_details = unpack_result(results.get("map_format_reward", []), "format_score")
 
     # 处理agent_search_reward结果

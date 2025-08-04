@@ -5,13 +5,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from rm_gallery.core.data.schema import DataOutput, DataSample, Step
-from rm_gallery.core.model.message import (
-    ChatMessage,
-    ChatTool,
-    MessageRole,
-    ChatTool,
-    Tool,
-)
+from rm_gallery.core.model.message import ChatMessage, ChatTool, MessageRole, Tool
 
 INVALID_REWARD = -0.01
 
@@ -147,7 +141,9 @@ def convert_tool_calls_format(msg: Dict[str, Any]) -> List[ChatTool]:
     return tool
 
 
-def convert_to_data_samples(group_messages: List[List[dict]]) -> DataSample:
+def convert_to_data_samples(
+    group_messages: List[List[dict]], tool_calls_reference
+) -> DataSample:
     """将group_messages 转换为 RM-Gallery 的 DataSample格式"""
     # 创建输入消息，group_messages 第一句为 user
     shared_input_messages = group_messages[0][:1]
@@ -203,5 +199,6 @@ def convert_to_data_samples(group_messages: List[List[dict]]) -> DataSample:
         unique_id="sample_deep_research",
         input=shared_input,
         output=outputs,
+        metadata={"tool_calls_reference": tool_calls_reference},
     )
     return sample

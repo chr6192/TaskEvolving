@@ -13,7 +13,10 @@ from deep_research.reward.utils import (
     extract_tool_calls,
 )
 from meta_info.rewards.express_reward import AsyncMapPeekModel, SyncMapPeekModel
-from meta_info.rewards.faithful_reward import AsyncMapFaithfulModel, SyncMapFaithfulModel
+from meta_info.rewards.faithful_reward import (
+    AsyncMapFaithfulModel,
+    SyncMapFaithfulModel,
+)
 from meta_info.rewards.finance_rule import MapFaithfulRuleBasedNumFilter, MapFormat
 from rm_gallery.gallery.rm.agent import create_agent_search_reward
 
@@ -179,7 +182,9 @@ async def compute_score_async(
     supply_contents = extract_tool_calls(group_messages)
     failthful_contents = extract_packing_faithful(group_responses)
     assistant_contents = extract_assistant_group_messages(group_messages)
-    sample = convert_to_data_samples(group_messages)  # 创建 sample 用于RM-Gallery的reward计算
+    sample = convert_to_data_samples(
+        group_messages
+    )  # 创建 sample 用于RM-Gallery的reward计算
 
     print(f"数据预处理完成: {len(assistant_contents)} 个助手回复")
 
@@ -190,13 +195,17 @@ async def compute_score_async(
     faithful_func = SyncMapFaithfulModel()
     express_func = SyncMapPeekModel()
 
-    executor.add_cpu_task("faithful_reward", faithful_func, assistant_contents, failthful_contents)
-    executor.add_cpu_task("express_reward", express_func, assistant_contents, prompt_contents)
+    executor.add_cpu_task(
+        "faithful_reward", faithful_func, assistant_contents, failthful_contents
+    )
+    executor.add_cpu_task(
+        "express_reward", express_func, assistant_contents, prompt_contents
+    )
 
     # step4: 注册CPU密集型任务（本地计算）
     num_filter_func = MapFaithfulRuleBasedNumFilter()
     format_func = MapFormat()
-    agent_search_reward = create_agent_search_reward()  # RM-Gallery的agent search reward
+    agent_search_reward = create_agent_search_reward()
 
     executor.add_cpu_task(
         "faithful_num_exist_reward",
@@ -204,8 +213,12 @@ async def compute_score_async(
         assistant_contents,
         supply_contents,
     )
-    executor.add_cpu_task("map_format_reward", format_func, assistant_contents, supply_contents)
-    executor.add_io_task("agent_search_reward", agent_search_reward.async_evaluate, sample)
+    executor.add_cpu_task(
+        "map_format_reward", format_func, assistant_contents, supply_contents
+    )
+    executor.add_io_task(
+        "agent_search_reward", agent_search_reward.async_evaluate, sample
+    )
 
     # step5: 并行执行所有任务
     print("开始并行执行所有reward任务...")
@@ -224,18 +237,44 @@ async def compute_score_async(
         else:
             return [], []
 
-    faithful_reward, faithful_details = unpack_result(results.get("faithful_reward", ([], [])))
-    express_reward, express_details = unpack_result(results.get("express_reward", ([], [])), "express_score")
+    faithful_reward, faithful_details = unpack_result(
+        results.get("faithful_reward", ([], []))
+    )
+    express_reward, express_details = unpack_result(
+        results.get("express_reward", ([], [])), "express_score"
+    )
     faithful_num_exist_reward, num_exist_details = unpack_result(
         results.get("faithful_num_exist_reward", []), "num_exist_score"
     )
-    map_format_reward, format_details = unpack_result(results.get("map_format_reward", []), "format_score")
+    map_format_reward, format_details = unpack_result(
+        results.get("map_format_reward", []), "format_score"
+    )
 
     # 处理agent_search_reward结果
     agent_search_result = results.get("agent_search_reward")
     agent_search_output_list = agent_search_result.output if agent_search_result else []
-    agent_search_reward_list = [output.answer.reward.score for output in agent_search_output_list]
-    agent_search_details = [output.answer.additional_kwargs for output in agent_search_output_list]
+    agent_search_reward_list = [
+        output.answer.reward.score for output in agent_search_output_list
+    ]
+    agent_search_details = [
+        output.answer.additional_kwargs for output in agent_search_output_list
+    ]
+
+    # 从agent_search_details中提取额外的奖励分数
+    search_info_reward_list = []
+    action_loop_reward_list = []
+    unnecessary_action_penalty_list = []
+
+    for detail in agent_search_details:
+        search_info_reward_list.append(
+            detail.get("search_info_reward", {}).get("score", 0.0)
+        )
+        action_loop_reward_list.append(
+            detail.get("action_loop_detection", {}).get("score", 0.0)
+        )
+        unnecessary_action_penalty_list.append(
+            detail.get("unnecessary_action_penalty", {}).get("score", 0.0)
+        )
 
     # step7: 校验reward长度
     expected_length = len(assistant_contents)
@@ -245,9 +284,14 @@ async def compute_score_async(
         "faithful_num_exist_reward": faithful_num_exist_reward,
         "map_format_reward": map_format_reward,
         "agent_search_reward": agent_search_reward_list,
+        "search_info_reward": search_info_reward_list,
+        "action_loop_reward": action_loop_reward_list,
+        "unnecessary_action_penalty": unnecessary_action_penalty_list,
     }
     for reward_name, reward_list in reward_dict.items():
-        assert len(reward_list) == expected_length, f"{reward_name}长度不正确: {len(reward_list)} != {expected_length}"
+        assert (
+            len(reward_list) == expected_length
+        ), f"{reward_name}长度不正确: {len(reward_list)} != {expected_length}"
 
     # step8: 计算总分
     total_score = (
@@ -315,75 +359,3 @@ def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
     # 移除以_tmp结尾的字段
     cleaned = {k: v for k, v in detail_dict.items() if not k.endswith("_tmp")}
     return cleaned
-
-
-def compute_score(
-    prompt: str,
-    group_responses: List[str],
-    group_messages: List[List[dict]],
-    group_extras=None,
-    use_group_reward=False,
-    return_details=False,
-    return_statistics=True,
-    **kwargs,
-) -> Union[
-    Tuple[List[float], Dict[str, List[float]]],
-    Tuple[List[float], Dict[str, List[float]], List[Dict[str, Any]]],
-]:
-    """
-    同步版本compute_score，保持向后兼容性
-
-    内部使用异步优化版本，通过asyncio.run包装
-    适用于不在异步上下文中的调用场景
-    """
-    # 设置超时时间
-    timeout = kwargs.get("timeout", 300.0)
-
-    try:
-        # 检查是否已经在事件循环中
-        loop = asyncio.get_running_loop()
-        # 如果已经在事件循环中，抛出错误提示
-        raise RuntimeError(
-            "compute_score不能在运行中的事件循环内调用。" "请在异步上下文中使用 await compute_score_async() 代替。"
-        )
-    except RuntimeError as e:
-        if "no running event loop" in str(e):
-            # 没有事件循环，可以安全使用 asyncio.run
-            try:
-                # 使用 asyncio.run 启动异步任务，但添加超时保护
-                return asyncio.run(
-                    asyncio.wait_for(
-                        compute_score_async(
-                            prompt,
-                            group_responses,
-                            group_messages,
-                            group_extras=group_extras,
-                            use_group_reward=use_group_reward,
-                            return_details=return_details,
-                            return_statistics=return_statistics,
-                            **kwargs,
-                        ),
-                        timeout=timeout,
-                    )
-                )
-            except asyncio.TimeoutError:
-                print(f"compute_score超时 ({timeout}秒)")
-                # 返回默认值
-                default_scores = [0.0] * len(group_responses)
-                default_info = {}
-                if return_details:
-                    return default_scores, default_info, []
-                else:
-                    return default_scores, default_info
-            except Exception as e:
-                print(f"compute_score执行异常: {e}")
-                # 返回默认值
-                default_scores = [0.0] * len(group_responses)
-                default_info = {}
-                if return_details:
-                    return default_scores, default_info, []
-                else:
-                    return default_scores, default_info
-        else:
-            # 其他RuntimeError，重新抛出
-            raise

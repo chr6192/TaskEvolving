@@ -1,24 +1,34 @@
-import os
-import json
-import numpy as np
-import matplotlib.pyplot as plt
-from collections import defaultdict
 import asyncio
+import json
+import os
+from collections import defaultdict
+
+import matplotlib.pyplot as plt
+import numpy as np
 from analysis_compute_reward import compute_score_async
+
+
+def load_tools_reference_file(query):
+    """从JSON文件加载tool_calls_reference"""
+    with open(
+        "/Users/cindy/Desktop/code/data/processed_multi_tool_result.json", "r"
+    ) as f:
+        tool_data = json.load(f)
+
+    # 在tool_data中查找匹配的query
+    matching_entry = next(
+        (entry for entry in tool_data if entry.get("query") == query), None
+    )
+    if matching_entry and "tool_calls_list" in matching_entry:
+        tool_calls_reference = matching_entry["tool_calls_list"]
+    else:
+        tool_calls_reference = []
+
+    return tool_calls_reference
 
 
 def compute_statistics(scores):
     """计算分数的统计信息"""
-    if not scores:
-        return {
-            "mean": 0.0,
-            "std": 0.0,
-            "var": 0.0,
-            "min": 0.0,
-            "max": 0.0,
-            "median": 0.0,
-            "count": 0,
-        }
     scores_array = np.array(scores)
     return {
         "mean": np.mean(scores_array),
@@ -66,45 +76,75 @@ async def analyze_steps_reward(directory_path):
         print(f"处理步骤 {step_num} ({filename})...")
 
         # 读取文件数据
-        group_responses = []
-        group_messages = []
-        rollout_data = []
+        all_data = []
 
         with open(file_path, "r", encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
                 try:
                     data = json.loads(line.strip())
-                    messages = data.get("messages", [])
-                    response = data.get("output", "")
-                    group_responses.append(response)
-                    group_messages.append(messages)
-                    rollout_data.append(data)
+                    all_data.append(data)
                 except json.JSONDecodeError as e:
                     print(f"警告: 文件 {filename} 第{line_num}行JSON解析错误: {e}")
                     continue
 
-        print(f"  成功加载 {len(group_responses)} 条数据")
+        print(f"  成功加载 {len(all_data)} 条数据")
 
-        # 计算奖励分数
-        prompt = ""
-        total_score, reward_info, reward_details = await compute_score_async(
-            prompt,
-            group_responses,
-            group_messages,
-            rollout_data=rollout_data,
-            return_details=True,
-        )
+        # 按query分组数据
+        query_groups = defaultdict(list)
+        for data in all_data:
+            # 提取query（与analysis_compute_reward.py中的逻辑保持一致）
+            content = data["messages"][0]["content"]
+            if "当前问题：" in content:
+                content_parts = content.split("当前问题：")
+                if len(content_parts) > 1:
+                    query = content_parts[1].strip()
+                else:
+                    query = content.strip()
+            else:
+                query = content.strip()
+            query_groups[query].append(data)
+
+        print(f"  按query分组后，共有 {len(query_groups)} 个不同的query")
+
+        # 汇总当前步骤的所有奖励分数
+        all_total_scores = []
+        all_reward_info = defaultdict(list)
+
+        # 对每个query组分别计算奖励
+        for query_idx, (query, query_data_list) in enumerate(query_groups.items()):
+            # 为当前query准备数据
+            group_responses = [data.get("output", "") for data in query_data_list]
+            group_messages = [data.get("messages", []) for data in query_data_list]
+            rollout_data = query_data_list
+            tool_calls_reference = load_tools_reference_file(query)
+
+            # 计算奖励分数
+            total_score, reward_info, reward_details = await compute_score_async(
+                query,  # 传入当前query作为prompt
+                group_responses,
+                group_messages,
+                rollout_data=rollout_data,
+                group_extras={
+                    "tool_calls_reference": tool_calls_reference,
+                },
+                return_details=True,
+            )
+
+            # 汇总结果
+            all_total_scores.extend(total_score)
+            all_reward_info["total_score"].extend(total_score)
+            for reward_key, scores in reward_info.items():
+                all_reward_info[reward_key].extend(scores)
+
+        # 添加总分维度
+        stats = compute_statistics(all_total_scores)
 
         # 存储每个奖励维度的均值
-        for reward_key, scores in reward_info.items():
+        for reward_key, scores in all_reward_info.items():
             stats = compute_statistics(scores)
             step_rewards[reward_key].append(stats["mean"])
 
-        # 添加总分维度
-        stats = compute_statistics(total_score)
-        step_rewards["total_score"].append(stats["mean"])
-
-        print(f"  步骤 {step_num} 处理完成")
+        print(f"  步骤 {step_num} 处理完成，总样本数: {len(all_total_scores)}")
 
     # 创建可视化图表
     print("\n开始生成步骤奖励均值图表...")
@@ -113,7 +153,9 @@ async def analyze_steps_reward(directory_path):
     return step_rewards, steps
 
 
-def create_step_visualizations(step_rewards, steps, reward_names, output_dir="step_reward_analysis_plots"):
+def create_step_visualizations(
+    step_rewards, steps, reward_names, output_dir="step_reward_analysis_plots"
+):
     """创建步骤奖励均值图表"""
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -135,11 +177,13 @@ def create_step_visualizations(step_rewards, steps, reward_names, output_dir="st
     for reward_key, means in step_rewards.items():
         if means and subplot_idx <= num_subplots:
             plt.subplot(rows, cols, subplot_idx)
-            plt.plot(steps, means, marker="o", linewidth=2, markersize=6)
+            plt.plot(steps, means, marker="o", linewidth=2, markersize=4)
             reward_name = reward_names.get(reward_key, reward_key)
-            plt.title(f"{reward_name} Mean", fontsize=12)
-            plt.xlabel("Step")
-            plt.ylabel("Reward Mean")
+            plt.title(f"{reward_name}", fontsize=16)
+            plt.xlabel("Step", fontsize=16)
+            plt.ylabel("Reward Mean", fontsize=16)
+            plt.xticks(fontsize=14)
+            plt.yticks(fontsize=14)
             plt.grid(True, alpha=0.3)
             subplot_idx += 1
 
@@ -152,15 +196,19 @@ def create_step_visualizations(step_rewards, steps, reward_names, output_dir="st
     for reward_key, means in step_rewards.items():
         if means:
             reward_name = reward_names.get(reward_key, reward_key)
-            plt.plot(steps, means, marker="o", linewidth=2, markersize=6, label=reward_name)
+            plt.plot(
+                steps, means, marker="o", linewidth=2, markersize=4, label=reward_name
+            )
 
     plt.title("Reward Dimension Means Across Steps", fontsize=16, fontweight="bold")
     plt.xlabel("Step", fontsize=12)
     plt.ylabel("Reward Mean", fontsize=12)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+    plt.legend(loc="lower right", fontsize=10)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f"{output_dir}/step_reward_means_combined.png", dpi=300, bbox_inches="tight")
+    plt.savefig(
+        f"{output_dir}/step_reward_means_combined.png", dpi=300, bbox_inches="tight"
+    )
     plt.close()
 
     print(f"步骤奖励分析图表已保存到目录: {output_dir}/")
@@ -171,7 +219,7 @@ def create_step_visualizations(step_rewards, steps, reward_names, output_dir="st
 
 async def main():
     # 指定包含JSONL文件的目录
-    directory_path = "/Users/cindy/Desktop/data/rollout_data"
+    directory_path = "/Users/cindy/Desktop/data/rollout/tool_rollout/rollout_data/"
 
     # 分析步骤奖励
     step_rewards, steps = await analyze_steps_reward(directory_path)

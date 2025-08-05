@@ -128,6 +128,9 @@ def preprocess_skeleton(n: int = 1, tools_kwargs_empty: bool = True, output_date
         tools_kwargs_empty: 控制tools_kwargs是否为空
         output_date_suffix: 输出文件日期后缀，如果为None则使用当前日期
     """
+    # 设置固定随机种子，确保结果可复现
+    random.seed(42)
+    
     if output_date_suffix is None:
         output_date_suffix = datetime.now().strftime("_%y%m%d")
     
@@ -233,6 +236,9 @@ def preprocess_skeleton(n: int = 1, tools_kwargs_empty: bool = True, output_date
             # 确保所有None值保持为None，避免混合类型
             if processed_df.iloc[i]['extra_info']['tools_kwargs'] == {}:
                 processed_df.iloc[i]['extra_info']['tools_kwargs'] = None
+        
+        # 对数据集进行随机排序
+        processed_df = processed_df.sample(frac=1, random_state=42).reset_index(drop=True)
         
         processed_df.to_parquet(output_path, index=False)
         print(f"已保存处理后的{dataset_type}数据到 {output_path}，共 {len(processed_data)} 条记录")

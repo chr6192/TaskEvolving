@@ -180,7 +180,7 @@ async def compute_score_async(
     supply_contents = extract_tool_calls(group_messages)
     failthful_contents = extract_packing_faithful(group_responses)
     assistant_contents = extract_assistant_group_messages(group_messages)
-    sample = convert_to_data_samples(group_messages)  # 创建 sample 用于RM-Gallery的reward计算
+    # sample = convert_to_data_samples(group_messages)  # 创建 sample 用于RM-Gallery的reward计算
     group_extras = [_process_extra_info(extra) for extra in group_extras]
     print(f"tool_calls_reference: {group_extras[0]['skeleton']['tool_calls_reference']}")
 

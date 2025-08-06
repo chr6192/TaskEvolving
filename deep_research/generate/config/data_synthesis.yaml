@@ -1,0 +1,124 @@
+hydra:
+  searchpath:
+    - file://verl/verl/trainer/config
+
+defaults:
+  - _self_
+
+# Pipeline stage control
+stage: "trajectory"  # "skeleton", "trajectory", or "both"
+
+# Input configuration
+input:
+  queries_file: "deep_research/data/4k_w_skeleton/test_250731.parquet"  # 支持parquet文件
+  batch_size: 1
+
+# Output configuration
+output:
+  skeleton_dir: "outputs/skeletons"
+  trajectory_dir: "outputs/trajectories"
+  log_dir: "outputs/logs"
+  save_intermediate: true
+  export_format: "jsonl"  # "jsonl" or "parquet"
+
+# Model configuration  
+model:
+  path: "/path/to/your/model"  # 需要设置实际模型路径，对于OpenAI API为模型名称如"gpt-4"
+  name: "qwen2.5-7b-instruct"  # 模型名称
+  trust_remote_code: false
+
+# Execution mode configuration
+execution_mode: "local"  # "local" 使用本地Ray+LLM, "openai_api" 使用OpenAI API
+
+# OpenAI API configuration (仅在 execution_mode: "openai_api" 时生效)
+openai_api:
+  api_key: null  # 可以留空，会从环境变量 OPENAI_API_KEY 读取
+  base_url: "https://api.openai.com/v1"  # OpenAI API 基础URL，支持兼容的API服务
+  organization: null  # 可选，组织ID
+  timeout: 60  # 请求超时时间（秒）
+  max_retries: 3  # 最大重试次数
+
+# Generation configuration
+generation:
+  n_samples_per_skeleton: 10
+  rollout_n: 10
+  temperature: 0.7
+  top_p: 0.9
+  max_new_tokens: 2048
+
+# Skeleton generation configuration
+skeleton:
+  model_name: null  # Use same as main model
+  prompt_template_path: "deep_research/generate/prompts/skeleton_generation.txt"
+  max_steps: 5
+  validation_enabled: true
+
+# PRM (Process Reward Model) configuration
+prm:
+  enabled: true
+  model_path: null  # If null, use rule-based scoring
+  selection_strategy: "best_of_n"  # "best_of_n", "threshold", "top_k"
+  threshold: 0.7
+  top_k: 3
+  scoring_method: "step_wise"  # "step_wise" or "trajectory_wise"
+
+# ORM (Outcome Reward Model) configuration
+orm:
+  enabled: true
+  reward_manager_class_path: "deep_research.reward.antfin_reward_manager.AntfinRewardManager"
+  async_mode: true
+  timeout: 300.0
+  max_workers: 8
+  evaluation_metrics:
+    - "faithful_reward"
+    - "express_reward"
+    - "faithful_num_exist_reward"
+    - "map_format_reward"
+
+# Rollout configuration (similar to training config)
+rollout:
+  name: "vllm"
+  mode: "async"
+  tensor_model_parallel_size: 2
+  gpu_memory_utilization: 0.6
+  max_model_len: 10240
+  response_length: 2048
+  prompt_length: 8192
+  dtype: "bfloat16"
+  enforce_eager: false
+  enable_chunked_prefill: true
+  disable_log_stats: false
+  multi_turn:
+    enable: true
+    max_turns: 10
+    format: "hermes"
+    completion_callback: null  # Will be set by command line
+    tool_config_path: null  # Will be set by command line
+
+# Tool configuration
+tool_config_path: "deep_research/config/tool_config/dr_tool_config.yaml"
+
+# Reward function configuration
+reward_function:
+  path: "deep_research.reward.dr_reward_function2"
+  name: "compute_score_async"
+
+# Completion callback configuration  
+completion_callback: "deep_research.generate.dr_synthesis_completion_callback.DrSynthesisCompletionCallback"
+
+# Experiment configuration
+experiment:
+  name: null  # Will be set by command line
+  gpus_per_node: 2
+  logging_level: "INFO"
+  save_detailed_logs: true
+
+# Quality control configuration
+quality_control:
+  min_skeleton_steps: 1
+  max_skeleton_steps: 5
+  min_trajectory_turns: 2
+  max_trajectory_turns: 20
+  filter_invalid_trajectories: true
+  filter_low_quality_trajectories: true
+  quality_threshold: 0.3 

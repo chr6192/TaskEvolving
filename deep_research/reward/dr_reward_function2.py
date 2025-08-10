@@ -182,7 +182,9 @@ async def compute_score_async(
     assistant_contents = extract_assistant_group_messages(group_messages)
     # sample = convert_to_data_samples(group_messages)  # 创建 sample 用于RM-Gallery的reward计算
     group_extras = [_process_extra_info(extra) for extra in group_extras]
-    print(f"tool_calls_reference: {group_extras[0]['skeleton']['tool_calls_reference']}")
+    skeleton = group_extras[0].get('skeleton', {})
+    tool_calls_reference = skeleton.get('tool_calls_reference', '')
+    print(f"tool_calls_reference: {tool_calls_reference}")
 
     print(f"数据预处理完成: {len(assistant_contents)} 个助手回复")
 
@@ -315,11 +317,18 @@ def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
 def _process_extra_info(extra_info: Dict[str, Any]) -> Dict[str, Any]:
     skeleton = extra_info.get("skeleton", {})
     assert skeleton != {}, f"skeleton is not found for index {extra_info}"
-    if "tool_calls_reference" in skeleton and isinstance(skeleton["tool_calls_reference"], str):
+    
+    # 安全处理tool_calls_reference字段
+    tool_calls_reference = skeleton.get("tool_calls_reference")
+    if tool_calls_reference is not None and isinstance(tool_calls_reference, str):
         try:
-            skeleton["tool_calls_reference"] = json.loads(skeleton["tool_calls_reference"])
+            skeleton["tool_calls_reference"] = json.loads(tool_calls_reference)
         except json.JSONDecodeError:
-            print(f"无法将tool_calls_reference从str解析为dict,保持原样: {skeleton['tool_calls_reference']}")
+            print(f"无法将tool_calls_reference从str解析为dict,保持原样: {tool_calls_reference}")
+    elif tool_calls_reference is None:
+        # 如果没有tool_calls_reference字段，设置为空字符串
+        skeleton["tool_calls_reference"] = ""
+        print("skeleton中没有tool_calls_reference字段，设置为空字符串")
 
     extra_info["skeleton"] = skeleton
     return extra_info

@@ -81,7 +81,9 @@ async def compute_score_async(
         group_messages, tool_calls_reference
     )  # 创建 sample 用于RM-Gallery的reward计算
     agent_search_reward = create_agent_search_reward()
-    agent_tool_call_rewards = create_tool_call_reward()
+    agent_tool_call_rewards = create_tool_call_reward(
+        strict_mode=False, use_jaccard_similarity=True
+    )  # 创建agent_tool_call_rewards
 
     start_time = time.perf_counter()
     agent_search_result = await agent_search_reward.async_evaluate(sample)

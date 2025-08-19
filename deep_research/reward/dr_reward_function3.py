@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from functools import wraps
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -18,7 +19,12 @@ from meta_info.rewards.faithful_reward import (
     SyncMapFaithfulModel,
 )
 from meta_info.rewards.finance_rule import MapFaithfulRuleBasedNumFilter, MapFormat
-from rm_gallery.gallery.rm.agent import create_agent_search_reward
+from rm_gallery.gallery.rm.agent import (
+    create_information_reward,
+    create_loop_detection_reward,
+    create_tool_call_reward,
+    create_unnecessary_action_penalty_reward,
+)
 
 
 class HybridRewardExecutor:
@@ -136,6 +142,57 @@ class HybridRewardExecutor:
         return self.timings.copy()
 
 
+def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """清理详细信息字典，移除临时字段"""
+    if not isinstance(detail_dict, dict):
+        return {}
+
+    # 移除以_tmp结尾的字段
+    cleaned = {k: v for k, v in detail_dict.items() if not k.endswith("_tmp")}
+    return cleaned
+
+
+def _process_extra_info(extra_info: Dict[str, Any]) -> Dict[str, Any]:
+    skeleton = extra_info.get("skeleton", {})
+    assert skeleton != {}, f"skeleton is not found for index {extra_info}"
+    if "tool_calls_reference" in skeleton and isinstance(
+        skeleton["tool_calls_reference"], str
+    ):
+        try:
+            skeleton["tool_calls_reference"] = json.loads(
+                skeleton["tool_calls_reference"]
+            )
+        except json.JSONDecodeError:
+            print(
+                f"无法将tool_calls_reference从str解析为dict,保持原样: {skeleton['tool_calls_reference']}"
+            )
+
+    extra_info["skeleton"] = skeleton
+    return extra_info
+
+
+def process_reward_result(result, score_key="score"):
+    """
+    通用处理 rm-gallery 返回reward结果的函数
+    """
+    output_list = result.output if result else []
+    reward_list = [output.answer.reward.score for output in output_list]
+    details_list = [output.answer.additional_kwargs for output in output_list]
+    return reward_list, details_list
+
+
+def unpack_result(result, default_key=None):
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    elif isinstance(result, list):
+        if default_key:
+            return result, [{default_key: score} for score in result]
+        else:
+            return result, []
+    else:
+        return [], []
+
+
 async def compute_score_async(
     prompt: str,
     group_responses: List[str],
@@ -182,8 +239,11 @@ async def compute_score_async(
     supply_contents = extract_tool_calls(group_messages)
     failthful_contents = extract_packing_faithful(group_responses)
     assistant_contents = extract_assistant_group_messages(group_messages)
+    group_extras = [_process_extra_info(extra) for extra in group_extras]
+
+    tool_calls_reference = group_extras[0]["skeleton"]["tool_calls_reference"]
     sample = convert_to_data_samples(
-        group_messages
+        group_messages, tool_calls_reference
     )  # 创建 sample 用于RM-Gallery的reward计算
 
     print(f"数据预处理完成: {len(assistant_contents)} 个助手回复")
@@ -205,7 +265,10 @@ async def compute_score_async(
     # step4: 注册CPU密集型任务（本地计算）
     num_filter_func = MapFaithfulRuleBasedNumFilter()
     format_func = MapFormat()
-    agent_search_reward = create_agent_search_reward()
+    agent_search_info_reward = create_information_reward()
+    action_loop_detection_reward = create_loop_detection_reward()
+    unnecessary_action_penalty_reward = create_unnecessary_action_penalty_reward()
+    agent_tool_call_rewards = create_tool_call_reward()
 
     executor.add_cpu_task(
         "faithful_num_exist_reward",
@@ -217,7 +280,18 @@ async def compute_score_async(
         "map_format_reward", format_func, assistant_contents, supply_contents
     )
     executor.add_io_task(
-        "agent_search_reward", agent_search_reward.async_evaluate, sample
+        "search_info_reward", agent_search_info_reward.async_evaluate, sample
+    )
+    executor.add_io_task(
+        "action_loop_reward", action_loop_detection_reward.async_evaluate, sample
+    )
+    executor.add_io_task(
+        "unnecessary_action_penalty",
+        unnecessary_action_penalty_reward.async_evaluate,
+        sample,
+    )
+    executor.add_io_task(
+        "agent_tool_call_reward", agent_tool_call_rewards.async_evaluate, sample
     )
 
     # step5: 并行执行所有任务
@@ -226,17 +300,6 @@ async def compute_score_async(
     timings = executor.get_timings()
 
     # step6: 统一处理reward结果
-    def unpack_result(result, default_key=None):
-        if isinstance(result, tuple) and len(result) == 2:
-            return result
-        elif isinstance(result, list):
-            if default_key:
-                return result, [{default_key: score} for score in result]
-            else:
-                return result, []
-        else:
-            return [], []
-
     faithful_reward, faithful_details = unpack_result(
         results.get("faithful_reward", ([], []))
     )
@@ -250,31 +313,23 @@ async def compute_score_async(
         results.get("map_format_reward", []), "format_score"
     )
 
-    # 处理agent_search_reward结果
-    agent_search_result = results.get("agent_search_reward")
-    agent_search_output_list = agent_search_result.output if agent_search_result else []
-    agent_search_reward_list = [
-        output.answer.reward.score for output in agent_search_output_list
-    ]
-    agent_search_details = [
-        output.answer.additional_kwargs for output in agent_search_output_list
-    ]
+    # 处理单独的搜索相关奖励结果
+    search_info_reward_list, search_info_details = process_reward_result(
+        results.get("search_info_reward")
+    )
 
-    # 从agent_search_details中提取额外的奖励分数
-    search_info_reward_list = []
-    action_loop_reward_list = []
-    unnecessary_action_penalty_list = []
+    action_loop_reward_list, action_loop_details = process_reward_result(
+        results.get("action_loop_reward")
+    )
 
-    for detail in agent_search_details:
-        search_info_reward_list.append(
-            detail.get("search_info_reward", {}).get("score", 0.0)
-        )
-        action_loop_reward_list.append(
-            detail.get("action_loop_detection", {}).get("score", 0.0)
-        )
-        unnecessary_action_penalty_list.append(
-            detail.get("unnecessary_action_penalty", {}).get("score", 0.0)
-        )
+    unnecessary_action_penalty_list, unnecessary_action_details = process_reward_result(
+        results.get("unnecessary_action_penalty")
+    )
+
+    # 处理agent_tool_call_rewards结果
+    tool_call_reward_list, tool_call_details = process_reward_result(
+        results.get("agent_tool_call_reward")
+    )
 
     # step7: 校验reward长度
     expected_length = len(assistant_contents)
@@ -283,10 +338,10 @@ async def compute_score_async(
         "express_reward": express_reward,
         "faithful_num_exist_reward": faithful_num_exist_reward,
         "map_format_reward": map_format_reward,
-        "agent_search_reward": agent_search_reward_list,
         "search_info_reward": search_info_reward_list,
         "action_loop_reward": action_loop_reward_list,
         "unnecessary_action_penalty": unnecessary_action_penalty_list,
+        "tool_call_reward": tool_call_reward_list,
     }
     for reward_name, reward_list in reward_dict.items():
         assert (
@@ -294,12 +349,23 @@ async def compute_score_async(
         ), f"{reward_name}长度不正确: {len(reward_list)} != {expected_length}"
 
     # step8: 计算总分
+    # 应用 unnecessary_action_penalty 规则：如果不为 1，则应用 -0.2 惩罚，否则使用 0.1*原始值
+    processed_unnecessary_action_penalty_list = []
+    for penalty in unnecessary_action_penalty_list:
+        if penalty != 1:
+            processed_unnecessary_action_penalty_list.append(-0.2)  # 直接应用 -0.2 惩罚
+        else:
+            processed_unnecessary_action_penalty_list.append(0.1 * penalty)
+
     total_score = (
-        0.3 * torch.tensor(faithful_reward)
-        + 0.3 * torch.tensor(express_reward)
+        0.25 * torch.tensor(faithful_reward)
+        + 0.25 * torch.tensor(express_reward)
         + 0.1 * torch.tensor(faithful_num_exist_reward)
         + 0.1 * torch.tensor(map_format_reward)
-        + 0.2 * torch.tensor(agent_search_reward_list)
+        + 0.05 * torch.tensor(search_info_reward_list)
+        + 0.05 * torch.tensor(action_loop_reward_list)
+        + torch.tensor(processed_unnecessary_action_penalty_list)  # 直接使用处理后的值
+        + 0.1 * torch.tensor(tool_call_reward_list)
     ).tolist()
 
     reward_info = {k: v for k, v in reward_dict.items()}
@@ -331,7 +397,10 @@ async def compute_score_async(
             ("express_details", express_details),
             ("num_exist_details", num_exist_details),
             ("format_details", format_details),
-            ("agent_search_details", agent_search_details),
+            ("search_info_details", search_info_details),
+            ("action_loop_details", action_loop_details),
+            ("unnecessary_action_details", unnecessary_action_details),
+            ("tool_call_details", tool_call_details),
         ]
         for i in range(expected_length):
             detail = {
@@ -349,13 +418,3 @@ async def compute_score_async(
         return total_score, reward_info, reward_details
     else:
         return total_score, reward_info
-
-
-def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """清理详细信息字典，移除临时字段"""
-    if not isinstance(detail_dict, dict):
-        return {}
-
-    # 移除以_tmp结尾的字段
-    cleaned = {k: v for k, v in detail_dict.items() if not k.endswith("_tmp")}
-    return cleaned

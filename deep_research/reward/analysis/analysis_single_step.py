@@ -14,7 +14,7 @@ from analysis_compute_reward import compute_score_async
 def load_tools_reference_file(query):
     """从JSON文件加载tool_calls_reference"""
     with open(
-        "/Users/cindy/Desktop/code/data/processed_multi_tool_result.json", "r"
+        "/Users/cindy/Desktop/code/data/processed_multi_tool_update.json", "r"
     ) as f:
         tool_data = json.load(f)
 
@@ -315,9 +315,7 @@ def save_detailed_results(
 
 async def analysis_reward():
     # 读取对话数据，已计算的文件
-    jsonl_file_path = (
-        "/Users/cindy/Desktop/data/rollout/tool_rollout/rollout_data/1.jsonl"
-    )
+    jsonl_file_path = "/Users/cindy/Desktop/data/rollout/Qwen3-8B-20250814-115823_w_penalty/rollout_data/1.jsonl"
     all_data = []
 
     with open(jsonl_file_path, "r", encoding="utf-8") as f:

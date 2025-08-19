@@ -140,6 +140,57 @@ class HybridRewardExecutor:
         return self.timings.copy()
 
 
+def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """清理详细信息字典，移除临时字段"""
+    if not isinstance(detail_dict, dict):
+        return {}
+
+    # 移除以_tmp结尾的字段
+    cleaned = {k: v for k, v in detail_dict.items() if not k.endswith("_tmp")}
+    return cleaned
+
+
+def _process_extra_info(extra_info: Dict[str, Any]) -> Dict[str, Any]:
+    skeleton = extra_info.get("skeleton", {})
+    assert skeleton != {}, f"skeleton is not found for index {extra_info}"
+    if "tool_calls_reference" in skeleton and isinstance(
+        skeleton["tool_calls_reference"], str
+    ):
+        try:
+            skeleton["tool_calls_reference"] = json.loads(
+                skeleton["tool_calls_reference"]
+            )
+        except json.JSONDecodeError:
+            print(
+                f"无法将tool_calls_reference从str解析为dict,保持原样: {skeleton['tool_calls_reference']}"
+            )
+
+    extra_info["skeleton"] = skeleton
+    return extra_info
+
+
+def process_reward_result(result, score_key="score"):
+    """
+    通用处理 rm-gallery 返回reward结果的函数
+    """
+    output_list = result.output if result else []
+    reward_list = [output.answer.reward.score for output in output_list]
+    details_list = [output.answer.additional_kwargs for output in output_list]
+    return reward_list, details_list
+
+
+def unpack_result(result, default_key=None):
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    elif isinstance(result, list):
+        if default_key:
+            return result, [{default_key: score} for score in result]
+        else:
+            return result, []
+    else:
+        return [], []
+
+
 async def compute_score_async(
     prompt: str,
     group_responses: List[str],
@@ -213,7 +264,9 @@ async def compute_score_async(
     num_filter_func = MapFaithfulRuleBasedNumFilter()
     format_func = MapFormat()
     agent_search_reward = create_agent_search_reward()
-    agent_tool_call_rewards = create_tool_call_reward()
+    agent_tool_call_rewards = create_tool_call_reward(
+        strict_mode=False, use_jaccard_similarity=True
+    )
 
     executor.add_cpu_task(
         "faithful_num_exist_reward",
@@ -237,17 +290,6 @@ async def compute_score_async(
     timings = executor.get_timings()
 
     # step6: 统一处理reward结果
-    def unpack_result(result, default_key=None):
-        if isinstance(result, tuple) and len(result) == 2:
-            return result
-        elif isinstance(result, list):
-            if default_key:
-                return result, [{default_key: score} for score in result]
-            else:
-                return result, []
-        else:
-            return [], []
-
     faithful_reward, faithful_details = unpack_result(
         results.get("faithful_reward", ([], []))
     )
@@ -262,14 +304,9 @@ async def compute_score_async(
     )
 
     # 处理agent_search_reward结果
-    agent_search_result = results.get("agent_search_reward")
-    agent_search_output_list = agent_search_result.output if agent_search_result else []
-    agent_search_reward_list = [
-        output.answer.reward.score for output in agent_search_output_list
-    ]
-    agent_search_details = [
-        output.answer.additional_kwargs for output in agent_search_output_list
-    ]
+    agent_search_reward_list, agent_search_details = process_reward_result(
+        results.get("agent_search_reward")
+    )
 
     # 从agent_search_details中提取额外的奖励分数
     search_info_reward_list = []
@@ -288,16 +325,9 @@ async def compute_score_async(
         )
 
     # 处理agent_tool_call_rewards结果
-    agent_tool_call_result = results.get("agent_tool_call_reward")
-    tool_call_output_list = (
-        agent_tool_call_result.output if agent_tool_call_result else []
+    tool_call_reward_list, tool_call_details = process_reward_result(
+        results.get("agent_tool_call_reward")
     )
-    tool_call_reward_list = [
-        output.answer.reward.score for output in tool_call_output_list
-    ]
-    tool_call_details = [
-        output.answer.additional_kwargs for output in tool_call_output_list
-    ]
 
     # step7: 校验reward长度
     expected_length = len(assistant_contents)
@@ -375,32 +405,3 @@ async def compute_score_async(
         return total_score, reward_info, reward_details
     else:
         return total_score, reward_info
-
-
-def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """清理详细信息字典，移除临时字段"""
-    if not isinstance(detail_dict, dict):
-        return {}
-
-    # 移除以_tmp结尾的字段
-    cleaned = {k: v for k, v in detail_dict.items() if not k.endswith("_tmp")}
-    return cleaned
-
-
-def _process_extra_info(extra_info: Dict[str, Any]) -> Dict[str, Any]:
-    skeleton = extra_info.get("skeleton", {})
-    assert skeleton != {}, f"skeleton is not found for index {extra_info}"
-    if "tool_calls_reference" in skeleton and isinstance(
-        skeleton["tool_calls_reference"], str
-    ):
-        try:
-            skeleton["tool_calls_reference"] = json.loads(
-                skeleton["tool_calls_reference"]
-            )
-        except json.JSONDecodeError:
-            print(
-                f"无法将tool_calls_reference从str解析为dict,保持原样: {skeleton['tool_calls_reference']}"
-            )
-
-    extra_info["skeleton"] = skeleton
-    return extra_info

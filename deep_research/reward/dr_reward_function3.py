@@ -142,13 +142,50 @@ class HybridRewardExecutor:
         return self.timings.copy()
 
 
+def _serialize_value(value: Any) -> Any:
+    """
+    递归序列化值，处理不可JSON序列化的对象
+    
+    Args:
+        value: 要序列化的值
+        
+    Returns:
+        可序列化的值
+    """
+    if isinstance(value, set):
+        return list(value)
+    elif isinstance(value, dict):
+        return {k: _serialize_value(v) for k, v in value.items()}
+    elif isinstance(value, (list, tuple)):
+        return [_serialize_value(item) for item in value]
+    elif hasattr(value, '__dict__'):
+        # 对于自定义对象，尝试序列化其__dict__
+        try:
+            return _serialize_value(value.__dict__)
+        except:
+            return str(value)
+    else:
+        try:
+            # 测试是否可以直接JSON序列化
+            import json
+            json.dumps(value)
+            return value
+        except (TypeError, ValueError):
+            # 如果不能序列化，转换为字符串
+            return str(value)
+
+
 def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """清理详细信息字典，移除临时字段"""
+    """清理详细信息字典，移除临时字段并处理不可序列化对象"""
     if not isinstance(detail_dict, dict):
         return {}
 
     # 移除以_tmp结尾的字段
     cleaned = {k: v for k, v in detail_dict.items() if not k.endswith("_tmp")}
+    
+    # 递归处理所有值，确保可以JSON序列化
+    cleaned = {k: _serialize_value(v) for k, v in cleaned.items()}
+    
     return cleaned
 
 

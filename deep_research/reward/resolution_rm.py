@@ -50,9 +50,9 @@ class ResolutionRMInterface:
         base_url: str = "https://internal.invalid",
         nickname: str = "数据合成系统",
         system_code: str = "蚂小财",
-        timeout: int = 300,
-        poll_interval: int = 10,
-        max_poll_attempts: int = 180  # 最大轮询次数，对应30分钟
+        timeout: int = 3000,
+        poll_interval: int = 30,
+        max_poll_attempts: int = 60  # 最大轮询次数，对应30分钟
     ):
         """
         初始化解决率RM接口
@@ -315,7 +315,7 @@ class ResolutionRMInterface:
                         return self._parse_evaluation_results(result)
                     
                     # 继续等待
-                    logger.info(f"第 {attempt + 1} 次查询，任务可能仍在进行中，等待 {self.poll_interval} 秒后重试...,接口返回结果：{result}")
+                    logger.info(f"第 {attempt + 1} 次查询url: {url}，任务可能仍在进行中，等待 {self.poll_interval} 秒后重试...,接口返回结果：{result}")
                     await asyncio.sleep(self.poll_interval)
             
             except aiohttp.ClientError as e:

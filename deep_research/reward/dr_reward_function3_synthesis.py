@@ -308,7 +308,7 @@ async def compute_score_async(
         from rm_gallery.core.model.openai_llm import OpenaiLLM
 
         llm = OpenaiLLM(
-            model="qwen3-235b-a22b-instruct-2507",
+            model="qwen3-max-preview",
             enable_thinking=True,
             base_url="http://dashscope.aliyuncs.com/compatible-mode/v1",
             openai_api_key=os.getenv("OPENAI_API_KEY"),

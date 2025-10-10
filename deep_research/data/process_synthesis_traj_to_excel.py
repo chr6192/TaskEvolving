@@ -165,7 +165,8 @@ def process_jsonl_to_excel(input_file: str, output_file: str):
                 # 保留原始的tool_calls和tool_responses字段（JSON格式）
                 original_fields = {
                     "tool_calls_json": json.dumps(data.get("tool_calls", []), ensure_ascii=False, indent=2),
-                    "tool_responses_json": json.dumps(data.get("tool_responses", []), ensure_ascii=False, indent=2)
+                    "tool_responses_json": json.dumps(data.get("tool_responses", []), ensure_ascii=False, indent=2),
+                    "messages_json": json.dumps(data.get("messages", []), ensure_ascii=False, indent=2)
                 }
                 
                 # 合并所有信息
@@ -187,13 +188,13 @@ def process_jsonl_to_excel(input_file: str, output_file: str):
                 #             row_data[key] = clean_text_for_excel(value, max_length=500)
                 
                 # 添加标注列
-                row_data.update({
-                    "人工标注_质量评分": "",
-                    "人工标注_问题类型": "",
-                    "人工标注_是否解决": "",
-                    "人工标注_工具使用合理性": "",
-                    "人工标注_备注": ""
-                })
+                # row_data.update({
+                #     "人工标注_质量评分": "",
+                #     "人工标注_问题类型": "",
+                #     "人工标注_是否解决": "",
+                #     "人工标注_工具使用合理性": "",
+                #     "人工标注_备注": ""
+                # })
                 
                 data_rows.append(row_data)
                 
@@ -215,7 +216,7 @@ def process_jsonl_to_excel(input_file: str, output_file: str):
     column_order = [
         "trajectory_id", "query_id", "user_query", "assistant_response",
         "tool_names", "total_tool_calls", "successful_calls", "failed_calls",
-        "prm_score", "financial_resolution_reward", "resolution_score",
+        "prm_score", "financial_resolution_reward", "resolution_score", "messages_json",
         "人工标注_质量评分", "人工标注_问题类型", "人工标注_是否解决", 
         "人工标注_工具使用合理性", "人工标注_备注"
     ]

@@ -294,6 +294,9 @@ async def compute_score_async(
         return_details: 是否返回详细信息
         return_statistics: 是否返回统计信息
         **kwargs: 其他参数
+            - rubrics_list: List[Optional[RubricsData]] - 与trajectories一一对应的rubrics列表（可选）
+            - rubrics_evaluator: RubricsEvaluator实例（可选）
+            - trajectories: TrajectoryData列表（可选，用于rubrics评估）
 
     Returns:
         total_score: 每个子对话的总分
@@ -302,6 +305,78 @@ async def compute_score_async(
     """
     print(f"开始混合并行优化的异步reward计算，处理 {len(group_responses)} 个响应")
     total_start_time = time.perf_counter()
+    
+    # 从 group_extras 中提取 rubrics（最简洁优雅的方式）
+    rubrics_list = []
+    trajectories_for_rubrics = []
+    
+    if group_extras:
+        from deep_research.synthesis.core.data_structures import RubricsData, TrajectoryData, ToolCall, ToolResponse
+        
+        for idx, extra in enumerate(group_extras):
+            # 提取 rubrics（dict 格式）
+            rubrics_dict = extra.get('rubrics', None)
+            rubrics = None
+            
+            if rubrics_dict and isinstance(rubrics_dict, dict):
+                try:
+                    rubrics = RubricsData.from_dict(rubrics_dict)
+                except Exception as e:
+                    print(f"无法从dict构建RubricsData: {e}")
+            elif isinstance(rubrics_dict, RubricsData):
+                rubrics = rubrics_dict
+            
+            rubrics_list.append(rubrics)
+            
+            # 构建 TrajectoryData（用于 rubrics 评估）
+            # 从 extra 中提取信息，复用已有的数据
+            tool_calls_dicts = extra.get('tool_calls', [])
+            tool_responses_dicts = extra.get('tool_responses', [])
+            
+            tool_calls = [
+                ToolCall(
+                    name=tc.get('name', ''),
+                    parameters=tc.get('parameters', {}),
+                    tool_call_id=tc.get('tool_call_id', '')
+                ) for tc in tool_calls_dicts
+            ]
+            
+            tool_responses = [
+                ToolResponse(
+                    tool_call_id=tr.get('tool_call_id', ''),
+                    content=tr.get('content', ''),
+                    reward_score=tr.get('reward_score', 0.0),
+                    metrics=tr.get('metrics', {}),
+                    success=tr.get('success', True),
+                    error_message=tr.get('error_message', None)
+                ) for tr in tool_responses_dicts
+            ]
+            
+            # 提取 query（从 skeleton 或 messages 中）
+            skeleton = extra.get('skeleton', {})
+            query_content = skeleton.get('query', '')
+            if not query_content and idx < len(group_messages):
+                # 从 messages 中提取第一个 user 消息
+                user_msgs = [m for m in group_messages[idx] if m.get('role') == 'user']
+                query_content = user_msgs[0].get('content', '') if user_msgs else ''
+            
+            # 构建 metadata，确保包含 query
+            metadata = extra.get('metadata', {}).copy()
+            if 'query' not in metadata:
+                metadata['query'] = query_content
+            
+            trajectory = TrajectoryData(
+                trajectory_id=extra.get('trajectory_id', ''),
+                skeleton_id=extra.get('skeleton_id', ''),
+                query_id=skeleton.get('query_id', extra.get('trajectory_id', '')),
+                messages=group_messages[idx] if idx < len(group_messages) else [],
+                tool_calls=tool_calls,
+                tool_responses=tool_responses,
+                metadata=metadata
+            )
+            # 动态添加 query 属性（用于 rubrics_evaluator）
+            trajectory.query = query_content
+            trajectories_for_rubrics.append(trajectory)
 
     # step0: 初始化 LLM 用于 Financial Resolution Rate Reward
     try:
@@ -380,6 +455,51 @@ async def compute_score_async(
         executor.add_io_task(
             "financial_resolution_reward", financial_resolution_reward.async_evaluate, sample
         )
+    
+    # 添加 Rubrics Evaluation Reward
+    # rubrics 从 group_extras 中提取，支持部分有rubrics、部分没有的情况
+    valid_rubrics_count = sum(1 for r in rubrics_list if r is not None)
+    if valid_rubrics_count > 0:
+        print(f"✅ 启用Rubrics评估（并发），{valid_rubrics_count}/{len(rubrics_list)} 个trajectories有rubrics")
+        
+        # 初始化 RubricsEvaluator
+        try:
+            from deep_research.synthesis.core.rubrics_evaluator import RubricsEvaluator
+            from omegaconf import OmegaConf
+            
+            # 从环境变量或默认配置获取
+            # 这里简化处理，实际应该从上层传入 config
+            import os
+            config_dict = {
+                'execution_mode': 'openai_api',
+                'openai_api': {
+                    'api_key': os.getenv('OPENAI_API_KEY'),
+                    'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                    'timeout': 60,
+                    'max_retries': 3
+                },
+                'model': {'name': 'qwen-max'},
+                'complexity_exploration': {
+                    'rubrics_evaluation': {
+                        'model_name': 'qwen-max',
+                        'temperature': 0.3,
+                        'max_new_tokens': 2048
+                    }
+                }
+            }
+            rubrics_config = OmegaConf.create(config_dict)
+            rubrics_evaluator = RubricsEvaluator(rubrics_config)
+            
+            executor.add_io_task(
+                "rubrics_reward",
+                rubrics_evaluator.batch_evaluate_with_optional_rubrics,
+                trajectories_for_rubrics,
+                rubrics_list
+            )
+        except Exception as e:
+            print(f"⚠️ 初始化RubricsEvaluator失败: {e}，跳过Rubrics评估")
+    else:
+        print("ℹ️ 没有trajectory关联rubrics，跳过Rubrics评估")
 
     # step5: 并行执行所有任务
     print("开始并行执行所有reward任务...")
@@ -421,8 +541,23 @@ async def compute_score_async(
     # 处理 financial resolution reward 结果
     financial_resolution_reward_list, financial_resolution_details = process_financial_resolution_reward_result(
         results.get("financial_resolution_reward"))
+    
+    # 处理 rubrics reward 结果
+    rubrics_result = results.get("rubrics_reward", None)
+    if rubrics_result and isinstance(rubrics_result, tuple) and len(rubrics_result) == 2:
+        rubrics_reward_list, rubrics_details_list = rubrics_result
+    else:
+        # 没有rubrics评估结果，使用默认值
+        rubrics_reward_list = []
+        rubrics_details_list = []
+    
     # step7: 校验reward长度
     expected_length = len(assistant_contents)
+    
+    # 确保rubrics_reward_list长度正确
+    if not rubrics_reward_list or len(rubrics_reward_list) != expected_length:
+        rubrics_reward_list = [0.0] * expected_length
+        rubrics_details_list = [{"note": "no_rubrics"}] * expected_length
     reward_dict = {
         "faithful_reward": faithful_reward,
         # "express_reward": express_reward,
@@ -433,6 +568,7 @@ async def compute_score_async(
         "unnecessary_action_penalty": unnecessary_action_penalty_list,
         "tool_call_reward": tool_call_reward_list,
         "financial_resolution_reward": financial_resolution_reward_list,
+        "rubrics_reward": rubrics_reward_list,
     }
     for reward_name, reward_list in reward_dict.items():
         assert (
@@ -449,6 +585,7 @@ async def compute_score_async(
         + torch.tensor(unnecessary_action_penalty_list)
         + torch.tensor(tool_call_reward_list)
         + torch.tensor(financial_resolution_reward_list)
+        + torch.tensor(rubrics_reward_list)
     ).tolist()
 
     reward_info = {k: v for k, v in reward_dict.items()}
@@ -469,6 +606,8 @@ async def compute_score_async(
         # print(f"格式规则奖励: {map_format_reward[i]:.4f}")
         if i < len(financial_resolution_reward_list):
             print(f"金融解决率奖励: {financial_resolution_reward_list[i]:.4f}")
+        if i < len(rubrics_reward_list) and rubrics_reward_list[i] > 0:
+            print(f"Rubrics评估奖励: {rubrics_reward_list[i]:.4f}")
         print(f"总分: {total_score[i]:.4f}")
     if len(assistant_contents) > 10:
         print(f"... 还有 {len(assistant_contents) - 10} 个样本")
@@ -487,6 +626,7 @@ async def compute_score_async(
             ("unnecessary_action_details", unnecessary_action_details),
             ("tool_call_details", tool_call_details),
             ("financial_resolution_details", financial_resolution_details),
+            ("rubrics_details", rubrics_details_list),
         ]
         for i in range(expected_length):
             detail = {

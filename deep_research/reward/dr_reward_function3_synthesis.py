@@ -551,8 +551,15 @@ async def compute_score_async(
         rubrics_reward_list = []
         rubrics_details_list = []
     
-    # step7: 校验reward长度
+    # step7: 校验和填充reward长度
     expected_length = len(assistant_contents)
+    
+    # 确保 financial_resolution_reward_list 长度正确
+    if not financial_resolution_reward_list or len(financial_resolution_reward_list) != expected_length:
+        print(f"⚠️ financial_resolution_reward长度不正确 ({len(financial_resolution_reward_list)} != {expected_length})，使用默认值填充")
+        financial_resolution_reward_list = [0.0] * expected_length
+        if not financial_resolution_details or len(financial_resolution_details) != expected_length:
+            financial_resolution_details = [{"note": "financial_resolution_failed_or_disabled"}] * expected_length
     
     # 确保rubrics_reward_list长度正确
     if not rubrics_reward_list or len(rubrics_reward_list) != expected_length:

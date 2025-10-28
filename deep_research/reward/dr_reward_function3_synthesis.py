@@ -469,7 +469,6 @@ async def compute_score_async(
             
             # 从环境变量或默认配置获取
             # 这里简化处理，实际应该从上层传入 config
-            import os
             config_dict = {
                 'execution_mode': 'openai_api',
                 'openai_api': {

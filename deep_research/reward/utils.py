@@ -317,7 +317,7 @@ def convert_to_data_samples(
         output=outputs,
         metadata={
             "tool_calls_reference": tool_calls_reference,
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "chat_date": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         },
     )
     return sample

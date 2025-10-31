@@ -314,15 +314,25 @@ async def compute_score_async(
         from deep_research.synthesis.core.data_structures import RubricsData, TrajectoryData, ToolCall, ToolResponse
         
         for idx, extra in enumerate(group_extras):
-            # 提取 rubrics（dict 格式）
+            # 提取 rubrics（支持 dict、str、RubricsData 三种格式）
             rubrics_dict = extra.get('rubrics', None)
             rubrics = None
             
+            # 处理字符串格式（JSON字符串）
+            if rubrics_dict and isinstance(rubrics_dict, str):
+                try:
+                    rubrics_dict = json.loads(rubrics_dict)
+                    print(f"成功将rubrics从str解析为dict")
+                except json.JSONDecodeError as e:
+                    print(f"无法将rubrics从str解析为dict: {e}，跳过该rubrics")
+                    rubrics_dict = None
+            
+            # 处理dict格式
             if rubrics_dict and isinstance(rubrics_dict, dict):
                 try:
                     rubrics = RubricsData.from_dict(rubrics_dict)
                 except Exception as e:
-                    print(f"无法从dict构建RubricsData: {e}")
+                    print(f"无法从dict构建RubricsData (idx={idx}): {e}")
             elif isinstance(rubrics_dict, RubricsData):
                 rubrics = rubrics_dict
             
@@ -332,6 +342,22 @@ async def compute_score_async(
             # 从 extra 中提取信息，复用已有的数据
             tool_calls_dicts = extra.get('tool_calls', [])
             tool_responses_dicts = extra.get('tool_responses', [])
+            
+            # 处理 tool_calls 可能是字符串的情况
+            if isinstance(tool_calls_dicts, str):
+                try:
+                    tool_calls_dicts = json.loads(tool_calls_dicts)
+                except json.JSONDecodeError as e:
+                    print(f"无法将tool_calls从str解析为list (idx={idx}): {e}")
+                    tool_calls_dicts = []
+            
+            # 处理 tool_responses 可能是字符串的情况
+            if isinstance(tool_responses_dicts, str):
+                try:
+                    tool_responses_dicts = json.loads(tool_responses_dicts)
+                except json.JSONDecodeError as e:
+                    print(f"无法将tool_responses从str解析为list (idx={idx}): {e}")
+                    tool_responses_dicts = []
             
             tool_calls = [
                 ToolCall(
@@ -354,6 +380,15 @@ async def compute_score_async(
             
             # 提取 query（从 skeleton 或 messages 中）
             skeleton = extra.get('skeleton', {})
+            
+            # 处理 skeleton 可能是字符串的情况
+            if isinstance(skeleton, str):
+                try:
+                    skeleton = json.loads(skeleton)
+                except json.JSONDecodeError as e:
+                    print(f"无法将skeleton从str解析为dict (idx={idx}): {e}")
+                    skeleton = {}
+            
             query_content = skeleton.get('query', '')
             if not query_content and idx < len(group_messages):
                 # 从 messages 中提取第一个 user 消息
@@ -361,7 +396,17 @@ async def compute_score_async(
                 query_content = user_msgs[0].get('content', '') if user_msgs else ''
             
             # 构建 metadata，确保包含 query
-            metadata = extra.get('metadata', {}).copy()
+            metadata = extra.get('metadata', {})
+            
+            # 处理 metadata 可能是字符串的情况
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError as e:
+                    print(f"无法将metadata从str解析为dict (idx={idx}): {e}")
+                    metadata = {}
+            
+            metadata = metadata.copy()
             if 'query' not in metadata:
                 metadata['query'] = query_content
             

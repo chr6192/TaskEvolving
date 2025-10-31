@@ -1,11 +1,14 @@
 import asyncio
 import json
+import logging
 import os
 import time
 from functools import wraps
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+
+logger = logging.getLogger(__name__)
 from deep_research.reward.utils import (
     INVALID_REWARD,
     convert_to_data_samples,
@@ -112,7 +115,17 @@ class HybridRewardExecutor:
         start_time = time.perf_counter()
         try:
             print(f"开始执行IO任务: {name}")
+            # 针对 rubrics_reward 添加详细日志
+            if name == "rubrics_reward":
+                logger = logging.getLogger(__name__)
+                logger.info(f"[{name}] 调用参数: args长度={len(args)}, 第一个arg类型={type(args[0]) if args else 'N/A'}, 长度={len(args[0]) if args and hasattr(args[0], '__len__') else 'N/A'}")
+            
             result = await async_func(*args, **kwargs)
+            
+            # 针对 rubrics_reward 添加结果日志
+            if name == "rubrics_reward":
+                logger.info(f"[{name}] 返回结果类型={type(result)}, 是tuple={isinstance(result, tuple)}, 长度={len(result) if isinstance(result, (tuple, list)) else 'N/A'}")
+            
             print(f"IO任务 {name} 执行完成")
             return result
         except Exception as e:
@@ -181,6 +194,13 @@ def _serialize_value(value: Any) -> Any:
 
 def _clean_detail_dict(detail_dict: Dict[str, Any]) -> Dict[str, Any]:
     """清理详细信息字典，移除临时字段并处理不可序列化对象"""
+    # 处理字符串格式的 JSON（先解析再清理）
+    if isinstance(detail_dict, str):
+        try:
+            detail_dict = json.loads(detail_dict)
+        except json.JSONDecodeError:
+            return {"error": "invalid_json_string", "raw_value": detail_dict[:200]}
+    
     if not isinstance(detail_dict, dict):
         return {}
 
@@ -306,40 +326,63 @@ async def compute_score_async(
     print(f"开始混合并行优化的异步reward计算，处理 {len(group_responses)} 个响应")
     total_start_time = time.perf_counter()
     
-    # 从 group_extras 中提取 rubrics（最简洁优雅的方式）
+    # 从 group_extras 中提取 rubrics 和构建 trajectories（合并处理，避免冗余循环）
     rubrics_list = []
     trajectories_for_rubrics = []
+    
+    # 统计信息
+    rubrics_stats = {
+        'total': 0,
+        'valid': 0,
+        'not_exist': 0,
+        'parse_failed': 0,
+        'build_failed': 0
+    }
     
     if group_extras:
         from deep_research.synthesis.core.data_structures import RubricsData, TrajectoryData, ToolCall, ToolResponse
         
+        logger.debug(f"开始从 {len(group_extras)} 个 group_extras 中提取 rubrics")
+        
         for idx, extra in enumerate(group_extras):
-            # 提取 rubrics（支持 dict、str、RubricsData 三种格式）
+            # === Part 1: 提取 rubrics ===
+            rubrics_stats['total'] += 1
             rubrics_dict = extra.get('rubrics', None)
             rubrics = None
             
-            # 处理字符串格式（JSON字符串）
-            if rubrics_dict and isinstance(rubrics_dict, str):
+            if not rubrics_dict:
+                # rubrics 不存在
+                rubrics_stats['not_exist'] += 1
+                logger.debug(f"[{idx}] rubrics 不存在于 extra")
+            elif isinstance(rubrics_dict, str):
+                # 处理字符串格式（JSON字符串）
+                logger.debug(f"[{idx}] rubrics 是字符串，长度={len(rubrics_dict)}")
                 try:
                     rubrics_dict = json.loads(rubrics_dict)
-                    print(f"成功将rubrics从str解析为dict")
+                    logger.debug(f"[{idx}] ✓ 成功解析 rubrics 字符串为 dict")
                 except json.JSONDecodeError as e:
-                    print(f"无法将rubrics从str解析为dict: {e}，跳过该rubrics")
+                    rubrics_stats['parse_failed'] += 1
+                    logger.warning(f"[{idx}] ✗ rubrics JSON解析失败: {e}, 前100字符: {rubrics_dict[:100]}")
                     rubrics_dict = None
             
-            # 处理dict格式
-            if rubrics_dict and isinstance(rubrics_dict, dict):
+            # 处理dict格式或RubricsData对象
+            if isinstance(rubrics_dict, dict):
+                logger.debug(f"[{idx}] 尝试从 dict 构建 RubricsData, keys={list(rubrics_dict.keys())}")
                 try:
                     rubrics = RubricsData.from_dict(rubrics_dict)
+                    rubrics_stats['valid'] += 1
+                    logger.debug(f"[{idx}] ✓ 成功构建 RubricsData")
                 except Exception as e:
-                    print(f"无法从dict构建RubricsData (idx={idx}): {e}")
+                    rubrics_stats['build_failed'] += 1
+                    logger.error(f"[{idx}] ✗ 从dict构建RubricsData失败: {e}")
             elif isinstance(rubrics_dict, RubricsData):
                 rubrics = rubrics_dict
+                rubrics_stats['valid'] += 1
+                logger.debug(f"[{idx}] rubrics 已经是 RubricsData 对象")
             
             rubrics_list.append(rubrics)
             
-            # 构建 TrajectoryData（用于 rubrics 评估）
-            # 从 extra 中提取信息，复用已有的数据
+            # === Part 2: 构建 TrajectoryData ===
             tool_calls_dicts = extra.get('tool_calls', [])
             tool_responses_dicts = extra.get('tool_responses', [])
             
@@ -422,6 +465,17 @@ async def compute_score_async(
             # 动态添加 query 属性（用于 rubrics_evaluator）
             trajectory.query = query_content
             trajectories_for_rubrics.append(trajectory)
+    
+    # 输出详细的 rubrics 提取统计
+    logger.info("=" * 60)
+    logger.info("Rubrics 提取统计:")
+    logger.info(f"  总数: {rubrics_stats['total']}")
+    logger.info(f"  ✓ 有效: {rubrics_stats['valid']}")
+    logger.info(f"  - 不存在: {rubrics_stats['not_exist']}")
+    logger.info(f"  ✗ 解析失败: {rubrics_stats['parse_failed']}")
+    logger.info(f"  ✗ 构建失败: {rubrics_stats['build_failed']}")
+    logger.info(f"  Trajectories 构建数量: {len(trajectories_for_rubrics)}")
+    logger.info("=" * 60)
 
     # step0: 初始化 LLM 用于 Financial Resolution Rate Reward
     try:
@@ -504,8 +558,10 @@ async def compute_score_async(
     # 添加 Rubrics Evaluation Reward
     # rubrics 从 group_extras 中提取，支持部分有rubrics、部分没有的情况
     valid_rubrics_count = sum(1 for r in rubrics_list if r is not None)
+    logger.info(f"Rubrics任务准备: valid={valid_rubrics_count}, total={len(rubrics_list)}, trajectories={len(trajectories_for_rubrics)}")
+    
     if valid_rubrics_count > 0:
-        print(f"✅ 启用Rubrics评估（并发），{valid_rubrics_count}/{len(rubrics_list)} 个trajectories有rubrics")
+        logger.info(f"✅ 启用Rubrics评估（并发），{valid_rubrics_count}/{len(rubrics_list)} 个trajectories有rubrics")
         
         # 初始化 RubricsEvaluator
         try:
@@ -533,6 +589,7 @@ async def compute_score_async(
             }
             rubrics_config = OmegaConf.create(config_dict)
             rubrics_evaluator = RubricsEvaluator(rubrics_config)
+            logger.info(f"✓ RubricsEvaluator 初始化成功")
             
             executor.add_io_task(
                 "rubrics_reward",
@@ -540,10 +597,11 @@ async def compute_score_async(
                 trajectories_for_rubrics,
                 rubrics_list
             )
+            logger.info(f"✓ rubrics_reward 任务已添加到 executor")
         except Exception as e:
-            print(f"⚠️ 初始化RubricsEvaluator失败: {e}，跳过Rubrics评估")
+            logger.error(f"⚠️ 初始化RubricsEvaluator失败: {e}，跳过Rubrics评估", exc_info=True)
     else:
-        print("ℹ️ 没有trajectory关联rubrics，跳过Rubrics评估")
+        logger.warning(f"ℹ️ 没有trajectory关联rubrics (valid_rubrics_count={valid_rubrics_count})，跳过Rubrics评估")
 
     # step5: 并行执行所有任务
     print("开始并行执行所有reward任务...")
@@ -588,12 +646,16 @@ async def compute_score_async(
     
     # 处理 rubrics reward 结果
     rubrics_result = results.get("rubrics_reward", None)
+    logger.debug(f"Rubrics结果: type={type(rubrics_result)}, is_tuple={isinstance(rubrics_result, tuple)}, len={len(rubrics_result) if isinstance(rubrics_result, (tuple, list)) else 'N/A'}")
+    
     if rubrics_result and isinstance(rubrics_result, tuple) and len(rubrics_result) == 2:
         rubrics_reward_list, rubrics_details_list = rubrics_result
+        logger.debug(f"Rubrics解包: rewards={len(rubrics_reward_list)}, details={len(rubrics_details_list)}, detail_types={[type(d).__name__ for d in rubrics_details_list[:3]]}")
     else:
         # 没有rubrics评估结果，使用默认值
         rubrics_reward_list = []
         rubrics_details_list = []
+        logger.debug(f"Rubrics结果格式不符，使用默认空列表")
     
     # step7: 校验和填充reward长度
     expected_length = len(assistant_contents)
@@ -690,7 +752,11 @@ async def compute_score_async(
             }
             for detail_key, detail_list in detail_sources:
                 if i < len(detail_list):
-                    detail[detail_key] = _clean_detail_dict(detail_list[i])
+                    raw_detail = detail_list[i]
+                    # Debug: 针对 rubrics_details 的详细日志
+                    if detail_key == "rubrics_details":
+                        logger.debug(f"清理前 rubrics_details[{i}]: type={type(raw_detail).__name__}, is_str={isinstance(raw_detail, str)}, len={len(str(raw_detail)) if raw_detail else 0}")
+                    detail[detail_key] = _clean_detail_dict(raw_detail)
             reward_details.append(detail)
         return total_score, reward_info, reward_details
     else:

@@ -367,14 +367,14 @@ async def compute_score_async(
             
             # 处理dict格式或RubricsData对象
             if isinstance(rubrics_dict, dict):
-                logger.debug(f"[{idx}] 尝试从 dict 构建 RubricsData, keys={list(rubrics_dict.keys())}")
                 try:
+                    # Pydantic会自动验证和转换字段类型（包括@field_validator）
                     rubrics = RubricsData.from_dict(rubrics_dict)
                     rubrics_stats['valid'] += 1
                     logger.debug(f"[{idx}] ✓ 成功构建 RubricsData")
                 except Exception as e:
                     rubrics_stats['build_failed'] += 1
-                    logger.error(f"[{idx}] ✗ 从dict构建RubricsData失败: {e}")
+                    logger.error(f"[{idx}] ✗ 从dict构建RubricsData失败: {e}", exc_info=True)
             elif isinstance(rubrics_dict, RubricsData):
                 rubrics = rubrics_dict
                 rubrics_stats['valid'] += 1

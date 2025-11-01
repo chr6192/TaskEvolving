@@ -457,13 +457,12 @@ async def compute_score_async(
                 trajectory_id=extra.get('trajectory_id', ''),
                 skeleton_id=extra.get('skeleton_id', ''),
                 query_id=skeleton.get('query_id', extra.get('trajectory_id', '')),
+                query=query_content,  # 直接在创建时传入query字段
                 messages=group_messages[idx] if idx < len(group_messages) else [],
                 tool_calls=tool_calls,
                 tool_responses=tool_responses,
                 metadata=metadata
             )
-            # 动态添加 query 属性（用于 rubrics_evaluator）
-            trajectory.query = query_content
             trajectories_for_rubrics.append(trajectory)
     
     # 输出详细的 rubrics 提取统计

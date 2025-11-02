@@ -577,10 +577,10 @@ async def compute_score_async(
                     'timeout': 60,
                     'max_retries': 3
                 },
-                'model': {'name': 'qwen-max'},
+                'model': {'name': 'qwen3-max'},
                 'complexity_exploration': {
                     'rubrics_evaluation': {
-                        'model_name': 'qwen-max',
+                        'model_name': 'qwen3-max',
                         'temperature': 0.3,
                         'max_new_tokens': 2048
                     }

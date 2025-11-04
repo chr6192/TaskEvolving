@@ -600,6 +600,128 @@ def process_kefu0903_to_parquet(txt_path: str = "deep_research/data/kefu0903/47t
         print("没有有效的数据可以处理")
 
 
+def process_xuangu_to_parquet(excel_path: str = "deep_research/data/xuangu/xuangu1104.xlsx", output_path: str = None, tools_kwargs_empty: bool = False):
+    """
+    读取xuangu Excel文件第一列作为queries，从uid.jsonl中随机匹配uid，转换为parquet格式
+    
+    Args:
+        excel_path: Excel文件路径，默认为xuangu/xuangu1104.xlsx
+        output_path: 输出parquet文件路径，如果为None则使用默认路径
+        tools_kwargs_empty: 控制tools_kwargs是否为空
+    """
+    if output_path is None:
+        date_suffix = datetime.now().strftime("_%y%m%d")
+        output_path = f"deep_research/data/xuangu/xuangu_processed{date_suffix}.parquet"
+    
+    # 读取Excel文件的第一个sheet
+    try:
+        df = pd.read_excel(excel_path, sheet_name=0)
+        print(f"成功读取Excel文件，共{len(df)}条记录")
+    except Exception as e:
+        print(f"读取Excel文件失败: {e}")
+        return
+    
+    # 获取第一列数据作为queries
+    first_column = df.iloc[:, 0]
+    queries = [str(q).strip() for q in first_column if pd.notna(q) and str(q).strip()]
+    print(f"从第一列提取了{len(queries)}个queries")
+    
+    # 读取uid列表
+    try:
+        with open('deep_research/data/uid.jsonl', 'r', encoding='utf-8') as f:
+            uid_list = json.load(f)
+        print(f"成功读取uid列表，共{len(uid_list)}个uid")
+    except Exception as e:
+        print(f"读取uid.jsonl失败: {e}")
+        return
+    
+    # 读取工具配置
+    tools_config = {}
+    if not tools_kwargs_empty:
+        try:
+            with open('deep_research/config/tool_config/dr_tool_config.yaml', 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+                # 构建tools_kwargs格式
+                for tool_item in config.get('tools', []):
+                    if 'tool_schema' in tool_item and 'function' in tool_item['tool_schema']:
+                        tool_name = tool_item['tool_schema']['function']['name']
+                        tools_config[tool_name] = {"dummy_field": None}
+        except FileNotFoundError:
+            print("工具配置文件未找到，使用默认工具配置")
+            tools_config = {
+                "investment_analysis": {"dummy_field": None},
+                "portfolio_allocation": {"dummy_field": None},
+                "finance_search": {"dummy_field": None},
+                "recommend_investments": {"dummy_field": None},
+                "user_info": {"dummy_field": None}
+            }
+    else:
+        tools_config = {
+            "investment_analysis": {"dummy_field": None},
+            "portfolio_allocation": {"dummy_field": None},
+            "finance_search": {"dummy_field": None},
+            "recommend_investments": {"dummy_field": None},
+            "user_info": {"dummy_field": None}
+        }
+    
+    processed_data = []
+    processed_combinations = set()
+    
+    for query in queries:
+        if not query:  # 跳过空query
+            continue
+        
+        # 为每个query随机选择一个uid
+        uid = random.choice(uid_list)
+        
+        # 创建query+uid组合的唯一标识
+        combination_key = f"{query}|{uid}"
+        
+        # 检查是否已处理过该组合（理论上不应该重复，因为是随机的）
+        if combination_key in processed_combinations:
+            print(f"跳过重复组合: query='{query[:50]}...' uid='{uid}'")
+            # 如果重复，重新随机选择一个uid
+            uid = random.choice(uid_list)
+            combination_key = f"{query}|{uid}"
+        
+        # 添加到已处理集合
+        processed_combinations.add(combination_key)
+        
+        # 构建数据结构，参照process_kefu0903_to_parquet的格式
+        data_item = {
+            "data_source": "xuangu1104_test",
+            "prompt": [
+                # {
+                #     "content": PROMPT.format(uid=uid, query=query),
+                #     "role": "user"
+                # }
+            ],
+            "extra_info": {
+                "need_tools_kwargs": not tools_kwargs_empty,
+                "skeleton": {
+                    "analysis": "",  # prompt为空，所以analysis为空
+                    "intent": "",
+                    "need_multi_step": True,
+                    "query": query,
+                    "tool_calls_reference": "",
+                    "uid": uid
+                },
+                "tools_kwargs": tools_config
+            }
+        }
+        
+        processed_data.append(data_item)
+    
+    # 保存处理后的数据
+    if processed_data:
+        processed_df = pd.DataFrame(processed_data)
+        processed_df.to_parquet(output_path, index=False)
+        print(f"已保存处理后的数据到 {output_path}，共 {len(processed_data)} 条记录")
+        print(f"总共处理了 {len(processed_combinations)} 个唯一的query+uid组合")
+    else:
+        print("没有有效的数据可以处理")
+
+
 def process_kefu_excel_to_parquet(excel_path: str, output_path: str = None, n: int = 1, tools_kwargs_empty: bool = False):
     """
     读取Excel文件并转换为目标parquet格式
@@ -754,11 +876,14 @@ if __name__ == "__main__":
     # ################################0729prompt+ yiwen处理后的4k条带skeleton = 4k条train################################
     # preprocess_skeleton(n=1, tools_kwargs_empty=False)
 
-     # ################################0729prompt+ 客服场景未解决query 31条，仅有skeleton analysis################################
-    # process_kefu_excel_to_parquet(excel_path="deep_research/data/kefu/客服DR典型Query.xlsx", output_path="deep_research/data/kefu/test_250823.parquet", n=1, tools_kwargs_empty=False)
-    
-    # ################################0903 kefu 47test_data.txt 处理UID和query对################################
-    process_kefu0903_to_parquet(txt_path="deep_research/data/kefu0903/47test_data.txt", output_path="deep_research/data/kefu0903/47test_250903.parquet", tools_kwargs_empty=False)
+    # ################################0729prompt+ 客服场景未解决query 31条，仅有skeleton analysis################################
+   # process_kefu_excel_to_parquet(excel_path="deep_research/data/kefu/客服DR典型Query.xlsx", output_path="deep_research/data/kefu/test_250823.parquet", n=1, tools_kwargs_empty=False)
+   
+   # ################################0903 kefu 47test_data.txt 处理UID和query对################################
+   # process_kefu0903_to_parquet(txt_path="deep_research/data/kefu0903/47test_data.txt", output_path="deep_research/data/kefu0903/47test_250903.parquet", tools_kwargs_empty=False)
+   
+   # ################################1104 xuangu xuangu1104.xlsx 处理选股query################################
+   process_xuangu_to_parquet(excel_path="deep_research/data/xuangu/xuangu1104.xlsx", output_path="deep_research/data/xuangu/xuangu_processed_251104.parquet", tools_kwargs_empty=False)
     
     ################################other################################
 

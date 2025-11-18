@@ -18,9 +18,9 @@ from deep_research.reward.utils import (
     INVALID_REWARD,
     convert_to_data_samples,
     extract_assistant_group_messages,
-    extract_first_user_contents,
-    extract_packing_faithful,
-    extract_packing_faithful_from_messages,
+    # extract_first_user_contents,
+    # extract_packing_faithful,
+    # extract_packing_faithful_from_messages,
     extract_tool_calls,
 )
 # 只导入本地规则奖励，不导入依赖远程服务的奖励
@@ -35,8 +35,8 @@ try:
         create_unnecessary_action_penalty_reward,
     )
     HAS_RM_GALLERY = True
-except ImportError:
-    logger.warning("rm_gallery 未安装，将跳过相关奖励计算")
+except ImportError as e:
+    logger.warning(f"rm_gallery 存在异常，将跳过相关奖励计算。详细错误: {e}")
     HAS_RM_GALLERY = False
 
 
@@ -297,13 +297,7 @@ async def compute_score_async(
     Tuple[List[float], Dict[str, List[float]], List[Dict[str, Any]]],
 ]:
     """
-    无远程服务依赖的异步reward计算函数
-    
-    已剥离的奖励（依赖远程服务，需要 rserving_client）:
-    - faithful_reward - 忠实性奖励
-    - express_reward - 体感奖励
-    
-    保留的奖励:
+    异步reward计算函数
     - faithful_num_exist_reward - 数字规则奖励（本地规则）
     - map_format_reward - 格式规则奖励（本地规则）
     - search_info_reward - 搜索信息奖励（rm_gallery）
@@ -500,10 +494,10 @@ async def compute_score_async(
             financial_resolution_reward = None
 
     # step1: 数据预处理
-    prompt_contents = extract_first_user_contents(group_messages)
+    # prompt_contents = extract_first_user_contents(group_messages)
     supply_contents = extract_tool_calls(group_messages)
     # failthful_contents = extract_packing_faithful(group_responses)
-    faithful_contents = extract_packing_faithful_from_messages(group_messages)
+    # faithful_contents = extract_packing_faithful_from_messages(group_messages)
     assistant_contents = extract_assistant_group_messages(group_messages)
     group_extras = [_process_extra_info(extra) for extra in group_extras]
 
@@ -724,9 +718,6 @@ async def compute_score_async(
     logger.info(f"总计算时间: {total_time:.4f}秒")
     logger.info(f"各任务详细耗时: {timings}")
     logger.info(f"IO任务数={len(executor.io_tasks)}, CPU任务数={len(executor.cpu_tasks)}")
-    logger.info("已剥离的奖励（需要远程服务）:")
-    logger.info("  - faithful_reward (忠实性奖励)")
-    logger.info("  - express_reward (体感奖励)")
     logger.info("=" * 80)
     
     for i in range(min(len(assistant_contents), 10)):

@@ -3,6 +3,7 @@
 
 包含各种数据源的处理器：
 - XuanguProcessor: 选股Excel处理
+- XuanjiProcessor: 选基Excel处理
 - KefuTextProcessor: 客服文本处理（UID+query在同一行）
 - KefuExcelProcessor: 客服Excel处理（包含analysis）
 - SkeletonJsonProcessor: 带skeleton的JSON处理
@@ -11,7 +12,10 @@
 import pandas as pd
 import json
 from typing import List, Dict, Any
-from dataset_processor_base import DatasetProcessor
+try:
+    from .dataset_processor_base import DatasetProcessor
+except ImportError:
+    from dataset_processor_base import DatasetProcessor
 
 
 class XuanguProcessor(DatasetProcessor):
@@ -72,6 +76,66 @@ class XuanguProcessor(DatasetProcessor):
     
     def get_data_source_name(self) -> str:
         return "xuangu1104_test"
+
+
+class XuanjiProcessor(DatasetProcessor):
+    """选基Excel数据处理器
+    
+    特点：
+    - 从Excel第一列读取queries
+    - 不包含prompt
+    - 包含空skeleton
+    - 随机匹配uid
+    
+    使用示例:
+        processor = XuanjiProcessor(
+            excel_path="data/xuanji/xuanji_250731.xlsx",
+            output_path="data/xuanji/xuanji_processed_250731.parquet",
+            n_uid_samples=1,
+            tools_kwargs_empty=False
+        )
+        df = processor.process()
+    """
+    
+    def __init__(self, excel_path: str, **kwargs):
+        """
+        Args:
+            excel_path: Excel文件路径
+            **kwargs: 传递给基类的其他参数
+        """
+        self.excel_path = excel_path
+        super().__init__(**kwargs)
+    
+    def load_raw_data(self) -> List[str]:
+        """从Excel读取queries"""
+        df = pd.read_excel(self.excel_path, sheet_name=0)
+        # 获取第一列作为queries，过滤空值
+        queries = [
+            str(q).strip() 
+            for q in df.iloc[:, 0] 
+            if pd.notna(q) and str(q).strip()
+        ]
+        return queries
+    
+    def parse_raw_item(self, raw_item: str) -> List[Dict]:
+        """解析单个query"""
+        query = raw_item.strip()
+        
+        if not query:
+            return []
+        
+        return [{
+            'query': query,
+            'include_prompt': False,  # 该数据集不包含prompt
+            'include_skeleton': True,
+            'analysis': '',
+            'intent': '',
+            'need_multi_step': True,
+            'tool_calls_reference': ''
+        }]
+    
+    def get_data_source_name(self) -> str:
+        return "xuanji_250731"
 
 
 class KefuTextProcessor(DatasetProcessor):
@@ -369,6 +433,22 @@ def process_xuangu_excel(
     return processor.process()
 
 
+def process_xuanji_excel(
+    excel_path: str,
+    output_path: str = None,
+    n_uid_samples: int = 1,
+    tools_kwargs_empty: bool = False
+) -> pd.DataFrame:
+    """处理选基Excel数据的便捷函数"""
+    processor = XuanjiProcessor(
+        excel_path=excel_path,
+        output_path=output_path,
+        n_uid_samples=n_uid_samples,
+        tools_kwargs_empty=tools_kwargs_empty
+    )
+    return processor.process()
+
+
 def process_kefu_text(
     txt_path: str,
     output_path: str = None,
@@ -454,6 +534,21 @@ if __name__ == "__main__":
     else:
         print(f"文件不存在: {excel_path}\n")
     
+    # 示例2: 处理选基Excel
+    print("示例2: 处理选基Excel")
+    excel_path = "deep_research/data/xuanji/xuanji_250731.xlsx"
+    if os.path.exists(excel_path):
+        df = process_xuanji_excel(
+            excel_path=excel_path,
+            output_path="deep_research/data/xuanji/xuanji_250731.parquet",
+            n_uid_samples=1,
+            tools_kwargs_empty=False
+        )
+        print(f"处理完成，共 {len(df)} 条记录\n")
+    else:
+        print(f"文件不存在: {excel_path}\n")
+    
+
     # 示例2: 处理客服文本
     # print("示例2: 处理客服文本")
     # df = process_kefu_text(

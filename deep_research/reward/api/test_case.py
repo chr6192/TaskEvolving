@@ -102,7 +102,8 @@ def test_async_with_rubrics():
     print(json.dumps({
         "task_id": "test_async_001",
         "prompt": prompt[:100] + "...",
-        "sample_count": len(response_list)
+        "sample_count": len(response_list),
+        "config": config
     }, indent=2, ensure_ascii=False))
     
     # 提交异步任务

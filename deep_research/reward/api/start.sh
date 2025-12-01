@@ -28,7 +28,8 @@ fi
 : ${API_HOST:=0.0.0.0}
 : ${API_PORT:=8000}
 : ${LOG_LEVEL:=INFO}
-: ${NUM_WORKERS:=1}
+: ${UVICORN_WORKERS:=1}  # Uvicorn多进程worker数量（生产环境建议设为1，避免内存缓存不共享问题）
+: ${NUM_TASK_PROCESSORS:=4}  # 进程内异步任务处理器数量
 
 echo "=========================================="
 echo "启动 Reward API 服务"
@@ -36,7 +37,12 @@ echo "=========================================="
 echo "Host: ${API_HOST}"
 echo "Port: ${API_PORT}"
 echo "Log Level: ${LOG_LEVEL}"
-echo "Workers: ${NUM_WORKERS}"
+echo "Uvicorn Workers: ${UVICORN_WORKERS} (多进程worker)"
+echo "Task Processors: ${NUM_TASK_PROCESSORS} (进程内异步处理器)"
+echo "=========================================="
+echo "⚠️  注意："
+echo "  - Uvicorn Workers > 1 时，需要使用Redis缓存"
+echo "  - 使用内存缓存时，建议 Uvicorn Workers = 1"
 echo "=========================================="
 
 # 启动服务
@@ -44,5 +50,5 @@ uvicorn deep_research.reward.api.main:app \
     --host ${API_HOST} \
     --port ${API_PORT} \
     --log-level ${LOG_LEVEL,,} \
-    --workers ${NUM_WORKERS}
+    --workers ${UVICORN_WORKERS}
 

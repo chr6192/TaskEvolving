@@ -28,10 +28,10 @@ class Settings(BaseSettings):
         env="MAX_CONCURRENT_GROUPS",
         description="最大并发group数量"
     )
-    num_workers: int = Field(
-        default=4,
-        env="NUM_WORKERS",
-        description="后台工作进程数量"
+    num_task_processors: int = Field(
+        default=8,
+        env="NUM_TASK_PROCESSORS",
+        description="进程内异步任务处理器数量"
     )
     max_queue_size: int = Field(
         default=1000,

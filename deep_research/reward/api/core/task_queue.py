@@ -78,8 +78,8 @@ class TaskQueue:
         self.queue = asyncio.Queue(maxsize=max_queue_size)
         self.tasks = {}  # task_id -> Task
         
-        # 后台工作任务
-        self.worker_tasks = []
+        # 后台任务处理器
+        self.processor_tasks = []
         self.is_running = False
         
         logger.info(f"TaskQueue 初始化: max_queue_size={max_queue_size}")
@@ -230,51 +230,55 @@ class TaskQueue:
         
         return None
     
-    async def start_workers(self, num_workers: int, reward_service):
+    async def start_processors(self, num_processors: int, reward_service):
         """
-        启动后台工作进程
+        启动后台异步任务处理器
+        
+        注意：这里的"processor"是进程内的异步任务处理器，不是uvicorn的多进程worker
         
         Args:
-            num_workers: 工作进程数量
+            num_processors: 任务处理器数量
             reward_service: RewardComputeService实例
         """
         if self.is_running:
-            logger.warning("工作进程已在运行")
+            logger.warning("任务处理器已在运行")
             return
         
         self.is_running = True
-        logger.info(f"启动 {num_workers} 个后台工作进程")
+        logger.info(f"启动 {num_processors} 个异步任务处理器（async task processors）")
         
-        for i in range(num_workers):
-            worker = asyncio.create_task(
-                self._worker(f"worker-{i}", reward_service)
+        for i in range(num_processors):
+            processor = asyncio.create_task(
+                self._task_processor(f"processor-{i}", reward_service)
             )
-            self.worker_tasks.append(worker)
+            self.processor_tasks.append(processor)
     
-    async def stop_workers(self):
-        """停止后台工作进程"""
+    async def stop_processors(self):
+        """停止后台异步任务处理器"""
         if not self.is_running:
             return
         
-        logger.info("停止后台工作进程...")
+        logger.info("停止异步任务处理器...")
         self.is_running = False
         
-        # 取消所有工作任务
-        for task in self.worker_tasks:
+        # 取消所有处理器任务
+        for task in self.processor_tasks:
             task.cancel()
         
         # 等待所有任务完成
-        await asyncio.gather(*self.worker_tasks, return_exceptions=True)
-        self.worker_tasks.clear()
+        await asyncio.gather(*self.processor_tasks, return_exceptions=True)
+        self.processor_tasks.clear()
         
-        logger.info("后台工作进程已停止")
+        logger.info("异步任务处理器已停止")
     
-    async def _worker(self, worker_name: str, reward_service):
+    async def _task_processor(self, processor_name: str, reward_service):
         """
-        后台工作进程
+        异步任务处理器
         从队列中取出任务并处理
+        
+        注意：这是进程内的异步任务处理协程，不是uvicorn的多进程worker
         """
-        logger.info(f"{worker_name} 已启动")
+        logger.info(f"{processor_name} 已启动")
         
         while self.is_running:
             try:
@@ -289,10 +293,10 @@ class TaskQueue:
                 
                 task = self.tasks.get(task_id)
                 if task is None:
-                    logger.warning(f"{worker_name}: 任务不存在 {task_id}")
+                    logger.warning(f"{processor_name}: 任务不存在 {task_id}")
                     continue
                 
-                logger.info(f"{worker_name}: 开始处理任务 {task_id}")
+                logger.info(f"{processor_name}: 开始处理任务 {task_id}")
                 
                 # 更新状态为处理中
                 await self.update_task_status(
@@ -326,7 +330,7 @@ class TaskQueue:
                     )
                     
                     logger.info(
-                        f"{worker_name}: 任务完成 {task_id}, "
+                        f"{processor_name}: 任务完成 {task_id}, "
                         f"耗时 {processing_time:.2f}s"
                     )
                     
@@ -344,18 +348,18 @@ class TaskQueue:
                     )
                     
                     logger.error(
-                        f"{worker_name}: 任务失败 {task_id}, "
+                        f"{processor_name}: 任务失败 {task_id}, "
                         f"错误: {error_msg}",
                         exc_info=True
                     )
                 
             except asyncio.CancelledError:
-                logger.info(f"{worker_name} 被取消")
+                logger.info(f"{processor_name} 被取消")
                 break
             except Exception as e:
-                logger.error(f"{worker_name} 发生错误: {e}", exc_info=True)
+                logger.error(f"{processor_name} 发生错误: {e}", exc_info=True)
         
-        logger.info(f"{worker_name} 已停止")
+        logger.info(f"{processor_name} 已停止")
     
     def get_stats(self) -> dict:
         """获取队列统计信息"""

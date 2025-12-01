@@ -39,7 +39,7 @@
 
 ```bash
 # 进入项目根目录
-cd /Users/chr/Dev/agentic-rl
+cd /Users/chr/Dev/agentRL
 
 # 安装必需依赖
 pip install fastapi uvicorn pydantic
@@ -67,7 +67,8 @@ OPENAI_API_KEY=your_api_key_here
 ```bash
 OPENAI_API_KEY=your_api_key_here
 MAX_CONCURRENT_GROUPS=10
-NUM_WORKERS=4
+NUM_TASK_PROCESSORS=4
+UVICORN_WORKERS=1
 CACHE_TYPE=memory
 LOG_LEVEL=INFO
 ```
@@ -308,7 +309,8 @@ print(result["message"])
 | `API_HOST` | `0.0.0.0` | 服务监听地址 |
 | `API_PORT` | `8000` | 服务端口 |
 | `MAX_CONCURRENT_GROUPS` | `10` | 最大并发group数量 |
-| `NUM_WORKERS` | `4` | 后台工作进程数量 |
+| `NUM_TASK_PROCESSORS` | `4` | 进程内异步任务处理器数量 |
+| `UVICORN_WORKERS` | `1` | Uvicorn多进程worker数量 |
 | `MAX_QUEUE_SIZE` | `1000` | 最大队列大小 |
 | `ENABLE_CACHE` | `true` | 是否启用缓存 |
 | `CACHE_TYPE` | `memory` | 缓存类型 (memory/redis) |
@@ -319,16 +321,42 @@ print(result["message"])
 
 ### 并发控制策略
 
-三层并发控制：
+#### ⚠️ 重要概念区分
 
-1. **请求级**: FastAPI自动管理，由uvicorn的worker数量控制
-2. **Group级**: `MAX_CONCURRENT_GROUPS` 控制同时处理的group数量
+**两种"Worker"的区别**：
+
+1. **Uvicorn Workers（多进程）**：
+   - 通过 `--workers` 参数或 `UVICORN_WORKERS` 环境变量控制
+   - 启动多个独立的进程，每个进程有独立的内存空间
+   - **⚠️ 使用内存缓存时必须设为1**，否则任务状态在不同进程间无法共享
+   - 使用Redis缓存时可以设为多个，提升并发能力
+
+2. **Task Processors（进程内异步处理器）**：
+   - 通过 `NUM_TASK_PROCESSORS` 环境变量控制
+   - 进程内的异步协程，共享同一进程的内存
+   - 负责从任务队列中取出任务并处理
+   - 数量可以根据负载灵活调整
+
+#### 三层并发控制
+
+1. **进程级**: Uvicorn Workers 控制（多进程）
+2. **Group级**: `MAX_CONCURRENT_GROUPS` 控制同时处理的group数量（单进程内）
 3. **内部任务级**: `compute_score_async` 内部的并发控制
 
-推荐配置：
-- 轻负载: `MAX_CONCURRENT_GROUPS=5`, `NUM_WORKERS=2`
-- 中负载: `MAX_CONCURRENT_GROUPS=10`, `NUM_WORKERS=4`
-- 重负载: `MAX_CONCURRENT_GROUPS=20`, `NUM_WORKERS=8`
+#### 推荐配置
+
+**使用内存缓存时（开发/测试）**：
+```bash
+UVICORN_WORKERS=1  # 必须为1
+NUM_TASK_PROCESSORS=4
+MAX_CONCURRENT_GROUPS=10
+CACHE_TYPE=memory
+```
+
+**使用Redis缓存时（生产环境）**：
+- 轻负载: `UVICORN_WORKERS=2`, `NUM_TASK_PROCESSORS=2`, `MAX_CONCURRENT_GROUPS=5`
+- 中负载: `UVICORN_WORKERS=4`, `NUM_TASK_PROCESSORS=4`, `MAX_CONCURRENT_GROUPS=10`
+- 重负载: `UVICORN_WORKERS=8`, `NUM_TASK_PROCESSORS=8`, `MAX_CONCURRENT_GROUPS=20`
 
 ### 缓存策略
 
@@ -376,18 +404,18 @@ print(result["message"])
     │ RewardComputeService │  │     TaskQueue        │
     │                      │  │                      │
     │ • 计算调度            │  │ • 任务管理            │
-    │ • 缓存管理            │  │ • 后台工作进程         │
+    │ • 缓存管理            │  │ • 异步任务处理器       │
     │ • 并发控制            │  │ • 状态追踪            │
     │ • 性能监控            │  │ • 队列调度            │
     └──────────┬───────────┘  └──────────┬───────────┘
                │                         │
                ▼                         ▼
     ┌──────────────────────┐  ┌──────────────────────┐
-    │   Cache Backend      │  │  Worker Processes    │
-    │                      │  │                      │
-    │ • MemoryCache        │  │ • Worker 1           │
-    │ • RedisCache         │  │ • Worker 2           │
-    │                      │  │ • Worker N           │
+    │   Cache Backend      │  │  Task Processors     │
+    │                      │  │  (进程内异步协程)      │
+    │ • MemoryCache        │  │ • Processor 1        │
+    │ • RedisCache         │  │ • Processor 2        │
+    │                      │  │ • Processor N        │
     └──────────────────────┘  └──────────┬───────────┘
                                          │
                                          ▼
@@ -493,11 +521,11 @@ TaskQueue.submit_task()
     ↓
 Client收到task_id
     │
-    └─→ 后台处理 ←─┐
-         Worker     │
-           ↓        │
-    RewardService   │
-           ↓        │
+    └─→ 后台处理 ←──────┐
+      TaskProcessor    │
+           ↓           │
+    RewardService      │
+           ↓           │
     更新状态: processing
            ↓
     compute_score_async()
@@ -598,6 +626,10 @@ lsof -i :8000
 # 终止进程
 lsof -ti:8000 | xargs kill -9
 ```
+或
+```
+ss -tulnp | grep ':8000 ' | grep -o 'pid=[0-9]*' | cut -d= -f2 | xargs kill -9
+```
 
 #### Q: 没有看到日志输出？
 
@@ -646,9 +678,10 @@ kill <PID>
 
 #### 任务堆积
 
-1. 增加 `NUM_WORKERS` 提升处理能力
+1. 增加 `NUM_TASK_PROCESSORS` 提升处理能力
 2. 检查单个任务的处理时间是否过长
 3. 考虑提高 `MAX_QUEUE_SIZE` 允许更多任务排队
+4. 如果使用Redis缓存，可以增加 `UVICORN_WORKERS` 多进程并发
 
 ### 依赖故障
 
@@ -700,7 +733,7 @@ deep_research/reward/api/
 pip install pytest pytest-asyncio httpx
 
 # 运行测试
-pytest deep_research/reward/api/tests/
+python deep_research/reward/api/test_case.py
 
 # 运行示例客户端
 python deep_research/reward/api/example_client.py
@@ -718,10 +751,11 @@ python deep_research/reward/api/example_client.py
 #### 垂直扩展
 单机性能优化：
 
-1. **增加Worker数量**: `NUM_WORKERS`
-2. **提高并发限制**: `MAX_CONCURRENT_GROUPS`
-3. **优化缓存大小**: `CACHE_MAX_SIZE`
-4. **调整队列大小**: `MAX_QUEUE_SIZE`
+1. **增加Uvicorn Workers**: `UVICORN_WORKERS`（需使用Redis缓存）
+2. **增加Task Processors**: `NUM_TASK_PROCESSORS`
+3. **提高并发限制**: `MAX_CONCURRENT_GROUPS`
+4. **优化缓存大小**: `CACHE_MAX_SIZE`
+5. **调整队列大小**: `MAX_QUEUE_SIZE`
 
 ### 安全考虑
 

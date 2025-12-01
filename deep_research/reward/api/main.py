@@ -83,13 +83,13 @@ async def lifespan(app: FastAPI):
         )
         logger.info("✓ 任务队列初始化成功")
         
-        # 5. 启动后台工作进程
-        logger.info(f"启动 {settings.num_workers} 个后台工作进程")
-        await task_queue.start_workers(
-            num_workers=settings.num_workers,
+        # 5. 启动后台异步任务处理器
+        logger.info(f"启动 {settings.num_task_processors} 个异步任务处理器（async task processors）")
+        await task_queue.start_processors(
+            num_processors=settings.num_task_processors,
             reward_service=reward_service,
         )
-        logger.info("✓ 后台工作进程启动成功")
+        logger.info("✓ 异步任务处理器启动成功")
         
         logger.info("=" * 80)
         logger.info("✅ Reward API 服务启动完成")
@@ -110,9 +110,9 @@ async def lifespan(app: FastAPI):
         logger.info("=" * 80)
         
         if task_queue:
-            logger.info("停止后台工作进程...")
-            await task_queue.stop_workers()
-            logger.info("✓ 后台工作进程已停止")
+            logger.info("停止异步任务处理器...")
+            await task_queue.stop_processors()
+            logger.info("✓ 异步任务处理器已停止")
         
         if cache_backend and hasattr(cache_backend, 'disconnect'):
             logger.info("关闭缓存连接...")
@@ -261,7 +261,7 @@ async def compute_rewards_async(request: AsyncComputeRequest):
             if metrics.get("avg_compute_time"):
                 avg_time = metrics["avg_compute_time"]
         
-        estimated_time = queue_stats["queue_size"] * avg_time / settings.num_workers
+        estimated_time = queue_stats["queue_size"] * avg_time / settings.num_task_processors
         
         return {
             "success": True,

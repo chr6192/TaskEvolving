@@ -261,9 +261,40 @@ def convert_to_data_samples(
     group_messages: List[List[dict]], tool_calls_reference
 ) -> DataSample:
     """将group_messages 转换为 RM-Gallery 的 DataSample格式"""
-    # 创建输入消息，group_messages 第一句为 user
-    shared_input_messages = group_messages[0][:1]
-
+    
+    # 检查第一条消息是否为 system prompt
+    first_msg = group_messages[0][0]
+    skip_messages = 0
+    
+    if first_msg["role"] == "system":
+        # 检查所有样本的第二条消息是否都是 user 且 content 相同
+        all_have_same_user = True
+        first_user_content = None
+        
+        for messages in group_messages:
+            if len(messages) < 2 or messages[1]["role"] != "user":
+                all_have_same_user = False
+                break
+            
+            if first_user_content is None:
+                first_user_content = messages[1]["content"]
+            elif first_user_content != messages[1]["content"]:
+                all_have_same_user = False
+                break
+        
+        if all_have_same_user:
+            # 剔除 system prompt，使用第一条 user message 作为 shared_input
+            shared_input_messages = group_messages[0][1:2]  # 获取第二条消息
+            skip_messages = 2  # 跳过前两条消息（system + user）
+        else:
+            # 保留 system prompt 作为 shared_input
+            shared_input_messages = group_messages[0][:1]
+            skip_messages = 1
+    else:
+        # 第一条不是 system prompt，保持原逻辑
+        shared_input_messages = group_messages[0][:1]
+        skip_messages = 1
+    
     # 将共享输入转换为 ChatMessage 对象
     shared_input = []
     for msg in shared_input_messages:
@@ -279,7 +310,7 @@ def convert_to_data_samples(
     for i, messages in enumerate(group_messages):
         # 将当前组的所有消息转换为 ChatMessage 对象
         output_messages = []
-        for msg in messages[1:]:  # 跳过第一条共享输入消息
+        for msg in messages[skip_messages:]:  # 跳过共享输入消息
             role = msg["role"]
             if role == "tool":
                 role = MessageRole.FUNCTION
@@ -298,7 +329,7 @@ def convert_to_data_samples(
             tool_calls=output_messages[-1].tool_calls,
         )
 
-        reasoning_steps = [
+        steps = [
             Step(
                 role=msg.role,
                 content=msg.content,
@@ -307,7 +338,7 @@ def convert_to_data_samples(
             for msg in output_messages
         ]
 
-        output = DataOutput(answer=final_answer, steps=reasoning_steps)
+        output = DataOutput(answer=final_answer, steps=steps)
         outputs.append(output)
 
     # 创建一个包含共享输入和所有输出的单一 DataSample

@@ -161,13 +161,20 @@ class RewardComputeService:
             
             try:
                 # 调用 compute_score_async
+                # 将config中的所有参数传递给compute_score_async
+                # 从config中提取参数，避免重复传递
+                config_params = config.copy()
+                return_details = config_params.pop("return_details", True)
+                return_statistics = config_params.pop("return_statistics", True)
+                
                 result = await self.compute_score_async(
                     prompt=prompt,
                     group_responses=response_list,
                     group_messages=messages_list,
                     group_extras=extra_list,
-                    return_details=config.get("return_details", True),
-                    return_statistics=config.get("return_statistics", True),
+                    return_details=return_details,
+                    return_statistics=return_statistics,
+                    **config_params,  # 传递其余config参数
                 )
                 
                 # 解析结果

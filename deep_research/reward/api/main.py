@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
         
         # 2. 初始化 compute_score_async 函数
         logger.info("加载 compute_score_async 函数")
-        from deep_research.reward.dr_reward_function_no_remote import compute_score_async
+        from deep_research.reward.dr_reward_function_bl import compute_score_async
         logger.info("✓ compute_score_async 加载成功")
         
         # 3. 初始化奖励计算服务

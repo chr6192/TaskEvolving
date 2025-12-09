@@ -297,7 +297,15 @@ result = response.json()
 
 print(result["message"])
 ```
-
+bash
+```
+curl -X POST http://localhost:8000/api/v1/cache/clear | jq -r '.message'
+```
+或（在DSW中）
+bash
+```
+curl -s -X POST http://localhost:8000/api/v1/cache/clear | python3 -c "import sys, json; print(json.load(sys.stdin)['message'])"
+```
 ---
 
 ## 配置说明

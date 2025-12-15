@@ -239,6 +239,8 @@ def process_reward_result(result, score_key="score"):
     """
     通用处理 rm-gallery 返回reward结果的函数
     """
+    logger.debug(f"result.output[0].answer.reward.score: {result.output[0].answer.reward.score}")
+    logger.debug(f"result.output[0].answer.additional_kwargs: {result.output[0].answer.additional_kwargs}")
     output_list = result.output if result else []
     reward_list = [output.answer.reward.score for output in output_list]
     details_list = [output.answer.additional_kwargs for output in output_list]
@@ -264,9 +266,9 @@ def process_financial_resolution_reward_result(result):
             total_score = additional_kwargs["financial_deep_research_resolution"]["total_score"]
             reward_list.append(total_score)
         else:
-            # 如果没有找到 total_score，使用默认值 0.0
+            # 如果没有找到 total_score，使用默认值 -99.0
             logger.warning(f"没有找到 total_score，使用默认值 -100, additional_kwargs: {additional_kwargs}")
-            reward_list.append(-100)
+            reward_list.append(-99)
 
         details_list.append(additional_kwargs)
 

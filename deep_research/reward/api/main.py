@@ -72,6 +72,8 @@ async def lifespan(app: FastAPI):
             max_concurrent_groups=settings.max_concurrent_groups,
             enable_cache=settings.enable_cache,
             cache_backend=cache_backend,
+            enable_persistence=settings.enable_persistence,
+            persistence_dir=settings.persistence_dir,
         )
         logger.info("✓ 奖励计算服务初始化成功")
         

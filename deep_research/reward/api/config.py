@@ -61,6 +61,18 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     log_file: Optional[str] = Field(default=None, env="LOG_FILE")
     
+    # ========== 数据持久化配置 ==========
+    enable_persistence: bool = Field(
+        default=True,
+        env="ENABLE_PERSISTENCE",
+        description="是否启用数据持久化"
+    )
+    persistence_dir: str = Field(
+        default="./data/reward_samples",
+        env="PERSISTENCE_DIR",
+        description="数据持久化目录"
+    )
+    
     # ========== OpenAI配置（用于compute_score_async内部） ==========
     openai_api_key: Optional[str] = Field(default=None, env="OPENAI_API_KEY")
     openai_base_url: Optional[str] = Field(

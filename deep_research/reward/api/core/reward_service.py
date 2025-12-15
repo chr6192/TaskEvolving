@@ -10,6 +10,8 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
+from .persistence import SamplePersistence
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,6 +30,8 @@ class RewardComputeService:
         max_concurrent_groups: int = 10,
         enable_cache: bool = True,
         cache_backend=None,  # Redis或内存缓存
+        enable_persistence: bool = True,
+        persistence_dir: str = "./data/reward_samples",
     ):
         """
         初始化服务
@@ -37,6 +41,8 @@ class RewardComputeService:
             max_concurrent_groups: 最大并发group数量
             enable_cache: 是否启用缓存
             cache_backend: 缓存后端（Redis或MemoryCache）
+            enable_persistence: 是否启用数据持久化
+            persistence_dir: 数据持久化目录
         """
         self.compute_score_async = compute_score_async_fn
         self.max_concurrent_groups = max_concurrent_groups
@@ -45,6 +51,12 @@ class RewardComputeService:
         
         # 并发控制信号量
         self.semaphore = asyncio.Semaphore(max_concurrent_groups)
+        
+        # 数据持久化
+        self.persistence = SamplePersistence(
+            base_dir=persistence_dir,
+            enabled=enable_persistence,
+        )
         
         # 监控指标
         self.metrics = {
@@ -58,7 +70,8 @@ class RewardComputeService:
         logger.info(
             f"RewardComputeService 初始化完成: "
             f"max_concurrent_groups={max_concurrent_groups}, "
-            f"enable_cache={enable_cache}"
+            f"enable_cache={enable_cache}, "
+            f"enable_persistence={enable_persistence}"
         )
     
     def _generate_cache_key(
@@ -201,6 +214,17 @@ class RewardComputeService:
                 # 保存到缓存
                 await self._set_to_cache(cache_key, result_dict, ttl=config.get("cache_ttl", 3600))
                 
+                # 持久化样本数据
+                await self.persistence.save_batch_samples(
+                    prompt=prompt,
+                    response_list=response_list,
+                    messages_list=messages_list,
+                    extra_list=extra_list,
+                    total_scores=total_scores,
+                    reward_info=reward_info,
+                    details=details,
+                )
+                
                 # 更新指标
                 self.metrics["total_requests"] += 1
                 self.metrics["total_compute_time"] += compute_time
@@ -281,6 +305,9 @@ class RewardComputeService:
             
             if metrics["cache_hits"] + metrics["cache_misses"] > 0:
                 metrics["cache_hit_rate"] = metrics["cache_hits"] / (metrics["cache_hits"] + metrics["cache_misses"])
+        
+        # 添加持久化统计
+        metrics["persistence"] = self.persistence.get_stats()
         
         return metrics
     

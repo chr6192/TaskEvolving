@@ -11,6 +11,7 @@
 - [API使用指南](#api使用指南)
 - [配置说明](#配置说明)
 - [架构设计](#架构设计)
+- [数据持久化](#数据持久化)
 - [性能优化](#性能优化)
 - [监控和日志](#监控和日志)
 - [故障排查](#故障排查)
@@ -28,6 +29,7 @@
 - ✅ **监控指标**: 完善的性能监控和统计信息
 - ✅ **详细日志**: 可配置的日志级别和输出
 - ✅ **并发控制**: 三层并发控制（请求级、group级、内部任务级）
+- ✅ **数据持久化**: 自动保存计算前后的样本数据，支持离线分析
 
 ---
 
@@ -284,6 +286,10 @@ print("\n队列状态:")
 print(f"  队列大小: {metrics['metrics']['queue']['queue_size']}")
 print(f"  总任务数: {metrics['metrics']['queue']['total_tasks']}")
 print(f"  状态分布: {metrics['metrics']['queue']['status_counts']}")
+
+print("\n持久化状态:")
+print(f"  已保存文件数: {metrics['metrics']['service']['persistence']['total_files']}")
+print(f"  已保存样本数: {metrics['metrics']['service']['persistence']['total_samples']}")
 ```
 
 ### 5. 清空缓存
@@ -297,15 +303,33 @@ result = response.json()
 
 print(result["message"])
 ```
-bash
-```
+
+**curl命令**：
+```bash
 curl -X POST http://localhost:8000/api/v1/cache/clear | jq -r '.message'
 ```
-或（在DSW中）
-bash
-```
+
+或（在DSW中）：
+```bash
 curl -s -X POST http://localhost:8000/api/v1/cache/clear | python3 -c "import sys, json; print(json.load(sys.stdin)['message'])"
 ```
+
+### 6. 查看持久化数据
+
+```python
+import json
+
+# 读取某个样本的所有记录
+sample_file = "./data/reward_samples/sample_traj_001.jsonl"
+with open(sample_file, "r", encoding="utf-8") as f:
+    for line in f:
+        record = json.loads(line)
+        print(f"时间: {record['timestamp']}")
+        print(f"分数: {record['output']['total_score']}")
+        print(f"输入: {record['input']['response'][:100]}...")
+        print("-" * 80)
+```
+
 ---
 
 ## 配置说明
@@ -324,6 +348,8 @@ curl -s -X POST http://localhost:8000/api/v1/cache/clear | python3 -c "import sy
 | `CACHE_TYPE` | `memory` | 缓存类型 (memory/redis) |
 | `CACHE_MAX_SIZE` | `10000` | 内存缓存最大条目数 |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis连接URL |
+| `ENABLE_PERSISTENCE` | `true` | 是否启用数据持久化 |
+| `PERSISTENCE_DIR` | `./data/reward_samples` | 数据持久化目录 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `OPENAI_API_KEY` | - | OpenAI API Key (必填) |
 
@@ -377,6 +403,26 @@ CACHE_TYPE=memory
 - 优点: 持久化，支持多实例共享
 - 缺点: 需要Redis服务，略慢
 - 配置: `CACHE_TYPE=redis`, `REDIS_URL=redis://localhost:6379/0`
+
+### 数据持久化配置
+
+服务支持自动保存计算前后的样本数据到本地文件，用于离线分析和调试。
+
+**启用持久化**：
+```bash
+ENABLE_PERSISTENCE=true
+PERSISTENCE_DIR=./data/reward_samples
+```
+
+**禁用持久化**：
+```bash
+ENABLE_PERSISTENCE=false
+```
+
+**数据格式**：
+- 文件格式: JSONL (每行一个JSON对象)
+- 文件命名: `sample_{unique_id}.jsonl`（根据样本的unique_id/trajectory_id/skeleton_id命名）
+- 保存方式: 追加写入（append mode）
 
 ---
 
@@ -546,6 +592,177 @@ Client查询 (/task/{id})
     ↓
 返回结果
 ```
+
+---
+
+## 数据持久化
+
+### 功能说明
+
+服务自动保存每次奖励计算的完整输入输出数据，用于：
+- 离线分析和调试
+- 模型训练数据收集
+- 结果追溯和审计
+
+### 数据结构
+
+每个样本保存为一个JSON对象，包含以下字段：
+
+```json
+{
+  "timestamp": "2025-12-15T10:30:00.123456",
+  "unique_id": "traj_001",
+  "input": {
+    "prompt": "如何购买基金？",
+    "response": "您可以通过手机银行购买基金...",
+    "messages": [
+      {"role": "user", "content": "如何购买基金？"},
+      {"role": "assistant", "content": "您可以通过手机银行购买基金..."}
+    ],
+    "extra": {
+      "skeleton_id": "skel_001",
+      "trajectory_id": "traj_001",
+      "skeleton": {...},
+      "tool_calls": [...],
+      "tool_responses": [...]
+    }
+  },
+  "output": {
+    "total_score": 0.85,
+    "reward_info": {
+      "faithful_num_exist_reward": 0.1,
+      "map_format_reward": 0.3,
+      "rubrics_reward": 0.45
+    },
+    "details": {
+      "performance_stats": {...}
+    }
+  }
+}
+```
+
+### 文件组织
+
+```
+./data/reward_samples/
+├── sample_traj_001.jsonl    # trajectory_id = traj_001 的所有样本
+├── sample_traj_002.jsonl    # trajectory_id = traj_002 的所有样本
+├── sample_skel_003.jsonl    # skeleton_id = skel_003 的所有样本
+└── ...
+```
+
+**命名规则**：
+- 文件名格式: `sample_{unique_id}.jsonl`
+- `unique_id` 按优先级从 extra 中提取: `unique_id` > `trajectory_id` > `skeleton_id`
+- 相同 unique_id 的样本追加到同一文件中
+
+### 使用示例
+
+#### 读取单个样本文件
+
+```python
+import json
+
+def read_sample_file(file_path):
+    """读取样本文件"""
+    samples = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            samples.append(json.loads(line))
+    return samples
+
+# 读取特定样本
+samples = read_sample_file("./data/reward_samples/sample_traj_001.jsonl")
+print(f"共 {len(samples)} 条记录")
+
+# 查看第一条记录
+first = samples[0]
+print(f"时间: {first['timestamp']}")
+print(f"分数: {first['output']['total_score']}")
+print(f"提示: {first['input']['prompt']}")
+```
+
+#### 统计分析
+
+```python
+import json
+from pathlib import Path
+
+def analyze_samples(data_dir="./data/reward_samples"):
+    """分析所有样本数据"""
+    total_samples = 0
+    total_score = 0.0
+    
+    for file in Path(data_dir).glob("sample_*.jsonl"):
+        with open(file, "r", encoding="utf-8") as f:
+            for line in f:
+                sample = json.loads(line)
+                total_samples += 1
+                score = sample['output']['total_score']
+                if score is not None:
+                    total_score += score
+    
+    avg_score = total_score / total_samples if total_samples > 0 else 0
+    print(f"总样本数: {total_samples}")
+    print(f"平均分数: {avg_score:.4f}")
+
+analyze_samples()
+```
+
+#### 过滤和导出
+
+```python
+import json
+from pathlib import Path
+
+def export_high_score_samples(data_dir="./data/reward_samples", min_score=0.8, output_file="high_scores.jsonl"):
+    """导出高分样本"""
+    with open(output_file, "w", encoding="utf-8") as out:
+        for file in Path(data_dir).glob("sample_*.jsonl"):
+            with open(file, "r", encoding="utf-8") as f:
+                for line in f:
+                    sample = json.loads(line)
+                    score = sample['output']['total_score']
+                    if score is not None and score >= min_score:
+                        out.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    
+    print(f"高分样本已导出到: {output_file}")
+
+export_high_score_samples()
+```
+
+### 配置选项
+
+**启用/禁用持久化**：
+```bash
+# 启用（默认）
+ENABLE_PERSISTENCE=true
+
+# 禁用
+ENABLE_PERSISTENCE=false
+```
+
+**自定义保存目录**：
+```bash
+# 相对路径
+PERSISTENCE_DIR=./data/reward_samples
+
+# 绝对路径
+PERSISTENCE_DIR=/data/production/reward_samples
+```
+
+### 性能影响
+
+- **写入方式**: 异步追加写入，不阻塞主计算流程
+- **性能开销**: 约 1-5ms/样本（取决于磁盘IO性能）
+- **存储空间**: 约 2-10KB/样本（取决于输入数据大小）
+
+### 注意事项
+
+1. **磁盘空间**: 定期清理旧数据避免磁盘满
+2. **文件数量**: 大量unique_id会产生大量文件，建议定期归档
+3. **并发安全**: 追加写入是原子操作，支持多进程/多线程
+4. **错误处理**: 持久化失败不影响计算结果返回，只记录警告日志
 
 ---
 

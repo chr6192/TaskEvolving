@@ -13,7 +13,7 @@ from deep_research.reward.api.example_client import RewardAPIClient
 # 加载测试数据
 def load_test_data():
     """从JSON文件加载测试数据"""
-    json_path = Path(__file__).parent / "test_data_with_rubrics.json"
+    json_path = Path(__file__).parent / "test_data_without_rubrics.json"
     with open(json_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
@@ -50,7 +50,7 @@ def prepare_multi_sample_data(num_samples: int = 2):
             "trajectory_id": f"test_traj_{i+1:03d}",
             "skeleton": {
                 "query": query,
-                "query_id": rubrics["query_id"],
+                "query_id": rubrics.get("query_id", ""),
                 "tool_calls_reference": []
             },
             "tool_calls": [],
@@ -60,7 +60,13 @@ def prepare_multi_sample_data(num_samples: int = 2):
         })
     
     config = {"return_details": True, "enable_rubrics_evaluation": True}
-    return query, response_list, messages_list, extra_list, config
+    return {
+        "prompt": query,
+        "response_list": response_list,
+        "messages_list": messages_list,
+        "extra_list": extra_list,
+        "config": config
+    }
 
 
 def test_sync_with_rubrics():
@@ -70,18 +76,15 @@ def test_sync_with_rubrics():
     print("="*80)
     
     client = RewardAPIClient()
-    prompt, response_list, messages_list, extra_list, config = prepare_multi_sample_data(num_samples=2)
+    data = prepare_multi_sample_data(num_samples=1)
     
     # 打印输入
     print("\n【输入】")
-    print(json.dumps({
-        "prompt": prompt[:100] + "...",
-        "sample_count": len(response_list),
-        "config": config
-    }, indent=2, ensure_ascii=False))
+    print(json.dumps(data, indent=2, ensure_ascii=False))
     
     # 调用API
-    result = client.compute_sync(prompt=prompt, response_list=response_list, messages_list=messages_list, extra_list=extra_list, config=config)
+    result = client.compute_sync(prompt=data["prompt"], response_list=data["response_list"], messages_list= data["messages_list"], extra_list=data["extra_list"], config=data["config"]
+    )
     
     # 打印输出
     print("\n【输出】")
@@ -95,19 +98,14 @@ def test_async_with_rubrics():
     print("="*80)
     
     client = RewardAPIClient()
-    prompt, response_list, messages_list, extra_list, config = prepare_multi_sample_data(num_samples=2)
+    data = prepare_multi_sample_data(num_samples=1)
     
     # 打印输入
     print("\n【输入】")
-    print(json.dumps({
-        "task_id": "test_async_001",
-        "prompt": prompt[:100] + "...",
-        "sample_count": len(response_list),
-        "config": config
-    }, indent=2, ensure_ascii=False))
+    print(json.dumps(data, indent=2, ensure_ascii=False))
     
     # 提交异步任务
-    task_id = client.compute_async(prompt=prompt, response_list=response_list, messages_list=messages_list, extra_list=extra_list, config=config, task_id="test_async_001")
+    task_id = client.compute_async(prompt=data["prompt"], response_list=data["response_list"], messages_list=data["messages_list"], extra_list=data["extra_list"], config=data["config"], task_id="test_async_001")
     print(f"\n任务已提交: {task_id}")
     
     # 等待完成
@@ -121,7 +119,7 @@ def test_async_with_rubrics():
 if __name__ == "__main__":
     # 运行所有测试
     try:
-        test_sync_with_rubrics()
+        # test_sync_with_rubrics()
         test_async_with_rubrics()
     except Exception as e:
         print(f"\n错误: {e}")

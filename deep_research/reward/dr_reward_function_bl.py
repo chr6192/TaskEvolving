@@ -41,6 +41,102 @@ except ImportError as e:
     logger.warning(f"rm_gallery 存在异常，将跳过相关奖励计算。详细错误: {e}")
     HAS_RM_GALLERY = False
 
+# ============= 全局单例：避免每次请求都创建新的LLM客户端 =============
+_global_llm = None
+_global_financial_resolution_reward = None
+_global_financial_faithful_reward = None
+_global_rubrics_evaluator = None
+_global_init_lock = asyncio.Lock()
+
+
+def _get_or_create_global_llm():
+    """获取或创建全局LLM实例（线程安全的懒加载）"""
+    global _global_llm
+    if _global_llm is None:
+        _global_llm = OpenaiLLM(
+            model="qwen3-max",
+            enable_thinking=True,
+            base_url="http://dashscope.aliyuncs.com/compatible-mode/v1",
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+        )
+        logger.info("✅ 全局LLM实例已创建")
+    return _global_llm
+
+
+async def _get_or_create_global_rewards():
+    """获取或创建全局Reward实例（避免重复初始化）"""
+    global _global_financial_resolution_reward, _global_financial_faithful_reward
+    
+    async with _global_init_lock:
+        if _global_financial_resolution_reward is None:
+            llm = _get_or_create_global_llm()
+            _global_financial_resolution_reward = FinancialDeepResearchResolutionReward(llm=llm)
+            _global_financial_faithful_reward = FinancialDeepResearchFaithfulReward(llm=llm)
+            logger.info("✅ 全局Financial Reward实例已创建")
+    
+    return _global_financial_resolution_reward, _global_financial_faithful_reward
+
+
+async def _get_or_create_global_rubrics_evaluator():
+    """获取或创建全局RubricsEvaluator实例"""
+    global _global_rubrics_evaluator
+    
+    async with _global_init_lock:
+        if _global_rubrics_evaluator is None:
+            from deep_research.synthesis.core.rubrics_evaluator import RubricsEvaluator
+            from omegaconf import OmegaConf
+            
+            config_dict = {
+                'execution_mode': 'openai_api',
+                'openai_api': {
+                    'api_key': os.getenv('OPENAI_API_KEY'),
+                    'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                    'timeout': 60,
+                    'max_retries': 3
+                },
+                'model': {'name': 'qwen3-max'},
+                'complexity_exploration': {
+                    'rubrics_evaluation': {
+                        'model_name': 'qwen3-max',
+                        'temperature': 0.3,
+                        'max_new_tokens': 2048
+                    }
+                }
+            }
+            rubrics_config = OmegaConf.create(config_dict)
+            _global_rubrics_evaluator = RubricsEvaluator(rubrics_config)
+            await _global_rubrics_evaluator.initialize()  # 初始化连接
+            logger.info("✅ 全局RubricsEvaluator实例已创建并初始化")
+    
+    return _global_rubrics_evaluator
+
+
+async def cleanup_global_resources():
+    """
+    清理全局资源（HTTP连接等）
+    应该在服务关闭时调用，避免连接泄漏
+    """
+    global _global_rubrics_evaluator, _global_llm
+    global _global_financial_resolution_reward, _global_financial_faithful_reward
+    
+    logger.info("开始清理全局资源...")
+    
+    # 清理RubricsEvaluator
+    if _global_rubrics_evaluator is not None:
+        try:
+            await _global_rubrics_evaluator.cleanup()
+            _global_rubrics_evaluator = None
+            logger.info("✓ RubricsEvaluator资源已清理")
+        except Exception as e:
+            logger.warning(f"清理RubricsEvaluator时出错: {e}")
+    
+    # 清理其他全局对象
+    _global_llm = None
+    _global_financial_resolution_reward = None
+    _global_financial_faithful_reward = None
+    
+    logger.info("全局资源清理完成")
+
 
 class HybridRewardExecutor:
     """
@@ -476,26 +572,15 @@ async def compute_score_async(
     logger.info(f"  Trajectories 构建数量: {len(trajectories_for_rubrics)}")
     logger.info("=" * 60)
 
-    # step0: 初始化 LLM 用于 RM-Gallery 奖励
+    # step0: 使用全局单例 LLM 和 Reward 实例（避免重复创建连接）
     financial_resolution_reward = None
     financial_faithful_reward = None
     
     if HAS_RM_GALLERY:
         try:
-            llm = OpenaiLLM(
-                model="qwen3-max",
-                enable_thinking=True,
-                base_url="http://dashscope.aliyuncs.com/compatible-mode/v1",
-                openai_api_key=os.getenv("OPENAI_API_KEY"),
-            )
-            
-            # 初始化 Financial Resolution Reward
-            financial_resolution_reward = FinancialDeepResearchResolutionReward(llm=llm)
-            logger.info("✅ Financial Resolution Reward 初始化成功")
-            
-            # 初始化 Financial Faithful Reward
-            financial_faithful_reward = FinancialDeepResearchFaithfulReward(llm=llm)
-            logger.info("✅ Financial Faithful Reward 初始化成功")
+            # 使用全局单例，避免每次请求都创建新的LLM客户端和HTTP连接
+            financial_resolution_reward, financial_faithful_reward = await _get_or_create_global_rewards()
+            logger.debug("✅ 使用全局Financial Reward实例")
             
         except Exception as e:
             logger.warning(f"⚠️ RM-Gallery 奖励初始化失败: {e}")
@@ -552,32 +637,10 @@ async def compute_score_async(
     if valid_rubrics_count > 0:
         logger.info(f"✅ 启用Rubrics评估（并发），{valid_rubrics_count}/{len(rubrics_list)} 个trajectories有rubrics")
         
-        # 初始化 RubricsEvaluator
+        # 使用全局单例 RubricsEvaluator（避免重复创建HTTP客户端）
         try:
-            from deep_research.synthesis.core.rubrics_evaluator import RubricsEvaluator
-            from omegaconf import OmegaConf
-            
-            # 从环境变量或默认配置获取
-            config_dict = {
-                'execution_mode': 'openai_api',
-                'openai_api': {
-                    'api_key': os.getenv('OPENAI_API_KEY'),
-                    'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                    'timeout': 60,
-                    'max_retries': 3
-                },
-                'model': {'name': 'qwen3-max'},
-                'complexity_exploration': {
-                    'rubrics_evaluation': {
-                        'model_name': 'qwen3-max',
-                        'temperature': 0.3,
-                        'max_new_tokens': 2048
-                    }
-                }
-            }
-            rubrics_config = OmegaConf.create(config_dict)
-            rubrics_evaluator = RubricsEvaluator(rubrics_config)
-            logger.info(f"✓ RubricsEvaluator 初始化成功")
+            rubrics_evaluator = await _get_or_create_global_rubrics_evaluator()
+            logger.debug(f"✓ 使用全局RubricsEvaluator实例")
             
             executor.add_io_task(
                 "rubrics_reward",

@@ -121,6 +121,15 @@ async def lifespan(app: FastAPI):
             await cache_backend.disconnect()
             logger.info("✓ 缓存连接已关闭")
         
+        # 清理全局LLM资源（避免连接泄漏）
+        try:
+            logger.info("清理全局LLM和HTTP连接...")
+            from deep_research.reward.dr_reward_function_bl import cleanup_global_resources
+            await cleanup_global_resources()
+            logger.info("✓ 全局LLM资源已清理")
+        except Exception as e:
+            logger.warning(f"清理全局资源时出错: {e}")
+        
         logger.info("=" * 80)
         logger.info("✅ Reward API 服务已关闭")
         logger.info("=" * 80)

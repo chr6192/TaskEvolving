@@ -857,38 +857,450 @@ PERSISTENCE_DIR=/data/production/reward_samples
 
 ## 监控和日志
 
-### 监控指标
+### 监控指标详解
 
-**服务级别**：
-- 总请求数
-- 缓存命中率
-- 平均计算时间
-- 总样本处理数
+#### 1. 基础指标
 
-**队列级别**：
-- 队列大小
-- 总任务数
-- 各状态任务数量
+| 指标名称 | 说明 | 用途 |
+|---------|------|------|
+| `total_requests` | 总请求数（包括成功和失败） | 流量监控 |
+| `success_requests` | 成功请求数 | 健康度评估 |
+| `failed_requests` | 失败请求数 | 错误率监控 |
+| `success_rate` | 成功率 = success_requests / total_requests | 服务质量指标 |
+| `total_samples_processed` | 处理的样本总数 | 工作量统计 |
+| `avg_samples_per_request` | 平均每请求样本数 | 请求复杂度 |
 
-**缓存级别**：
-- 缓存条目数
-- 使用率
-- 命中/未命中统计
+#### 2. 缓存指标
+
+| 指标名称 | 说明 | 用途 |
+|---------|------|------|
+| `cache_hits` | 缓存命中次数 | 缓存效果评估 |
+| `cache_misses` | 缓存未命中次数 | 实际计算量 |
+| `cache_hit_rate` | 缓存命中率 | 缓存优化参考 |
+
+#### 3. 性能指标
+
+| 指标名称 | 说明 | 统计范围 |
+|---------|------|---------|
+| `total_response_time` | 总响应时间（包含缓存查询） | 所有请求 |
+| `avg_response_time` | 平均响应时间 | 所有请求（包括缓存命中） |
+| `total_compute_time` | 总计算耗时（仅实际计算） | 仅缓存未命中的请求 |
+| `avg_compute_time` | 平均计算耗时 | 仅缓存未命中的请求 |
+| `max_compute_time` | 最大计算耗时 | 历史极值 |
+| `min_compute_time` | 最小计算耗时 | 历史极值 |
+
+**响应时间 vs 计算时间**：
+- **响应时间**：完整的请求处理时间（缓存查询 + 计算 + 持久化），统计所有请求
+- **计算时间**：仅实际调用 `compute_score_async` 的时间，仅统计缓存未命中的请求
+- **关系**：`avg_response_time < avg_compute_time`（因为缓存命中拉低了平均响应时间）
+
+#### 4. 队列指标
+
+| 指标名称 | 说明 |
+|---------|------|
+| `queue_size` | 当前等待处理的任务数 |
+| `total_tasks` | 内存中的任务总数 |
+| `status_counts` | 各状态任务数量（pending/processing/completed/failed） |
+| `max_queue_size` | 最大队列容量 |
+
+### 查询监控指标
+
+```bash
+# 查询所有指标
+curl http://localhost:8000/api/v1/metrics | jq '.metrics.service'
+
+# 查询特定指标
+curl -s http://localhost:8000/api/v1/metrics | jq '.metrics.service | {
+  total_requests,
+  success_rate,
+  cache_hit_rate,
+  avg_response_time,
+  avg_compute_time
+}'
+```
+
+### 自动日志导出
+
+服务在每次持久化保存后自动导出统计摘要到日志，格式如下：
+
+```
+📊 统计摘要 [总计] 请求: 100 (成功: 98, 失败: 2), 样本: 1000, 缓存命中率: 75.0%
+📊 统计摘要 [性能] 平均响应: 156.3ms, 平均计算: 2.35s, 最大计算: 5.21s, 最小计算: 0.89s
+📊 统计摘要 [本次] 样本: 10, 计算: 2.15s, 响应: 2.18s
+```
+
+**日志字段说明**：
+- **[总计]**：累计统计，反映服务启动以来的整体情况
+- **[性能]**：平均和极值性能指标
+- **[本次]**：当前请求的统计，用于对比单次性能与平均性能
+
+### 实际监控场景
+
+#### 场景1：性能监控
+
+```bash
+# 持续监控平均响应时间（每30秒）
+watch -n 30 'curl -s http://localhost:8000/api/v1/metrics | jq ".metrics.service.avg_response_time * 1000"'
+```
+
+#### 场景2：异常检测
+
+```bash
+# 检查是否有异常慢的请求
+curl -s http://localhost:8000/api/v1/metrics | jq ".metrics.service | {
+  max_compute_time,
+  avg_compute_time,
+  ratio: (.max_compute_time / .avg_compute_time)
+}"
+```
+
+如果 `ratio > 3`，说明存在异常慢的请求，需要检查：
+- LLM API 是否超时
+- 是否有特别复杂的样本
+- 系统资源是否充足
+
+#### 场景3：健康度监控
+
+```bash
+# 监控成功率和失败请求
+curl -s http://localhost:8000/api/v1/metrics | jq ".metrics.service | {
+  success_rate,
+  failed_requests,
+  total_requests
+}"
+```
+
+如果 `success_rate < 0.99`，需要检查日志找出失败原因。
+
+#### 场景4：缓存效果评估
+
+```bash
+# 评估缓存效果
+curl -s http://localhost:8000/api/v1/metrics | jq ".metrics.service | {
+  cache_hit_rate,
+  avg_response_time_ms: (.avg_response_time * 1000),
+  avg_compute_time_s: .avg_compute_time,
+  speedup: (if .avg_response_time > 0 then (.avg_compute_time / .avg_response_time) else 0 end)
+}"
+```
 
 ### 日志系统
 
 **日志级别**：
-- DEBUG: 详细调试信息
-- INFO: 常规操作信息
-- WARNING: 警告信息
-- ERROR: 错误信息
+- DEBUG: 详细调试信息（包括缓存key、锁获取等）
+- INFO: 常规操作信息（请求完成、统计摘要等）
+- WARNING: 警告信息（缓存失败、持久化失败等）
+- ERROR: 错误信息（计算失败、异常堆栈等）
 
-**日志内容**：
-- 请求开始/结束
-- 处理时间
-- 错误堆栈
-- 缓存命中/未命中
-- 任务状态变化
+**关键日志示例**：
+
+```
+# 缓存命中
+INFO: 缓存命中返回: 10 个样本, 响应耗时 2.34ms
+
+# 计算完成
+INFO: 计算完成: 10 个样本, 计算耗时 2.15s, 总响应耗时 2.18s
+
+# 统计摘要（自动导出）
+INFO: 📊 统计摘要 [总计] 请求: 100 (成功: 100, 失败: 0), 样本: 1000, 缓存命中率: 75.0%
+INFO: 📊 统计摘要 [性能] 平均响应: 156.3ms, 平均计算: 2.35s, 最大计算: 5.21s, 最小计算: 0.89s
+INFO: 📊 统计摘要 [本次] 样本: 10, 计算: 2.15s, 响应: 2.18s
+
+# 计算失败
+ERROR: 计算奖励时发生错误: ConnectionError...
+```
+
+### 统计准确性保证
+
+✅ **已解决的统计问题**：
+
+1. **缓存命中时统计遗漏** - 所有请求（包括缓存命中）都会被正确统计
+2. **并发竞争导致统计丢失** - 使用 `asyncio.Lock` 保护所有统计更新
+3. **失败请求未统计** - 新增 `failed_requests` 指标跟踪失败情况
+
+**验证统计准确性**：
+
+```bash
+# 1. 清空缓存和统计
+curl -X POST http://localhost:8000/api/v1/cache/clear
+
+# 2. 发送3个相同请求（第2、3次应该缓存命中）
+for i in {1..3}; do
+  curl -X POST http://localhost:8000/api/v1/rewards/compute \
+    -H "Content-Type: application/json" \
+    -d '{
+      "prompt": "测试",
+      "response_list": ["A", "B"],
+      "messages_list": [[], []],
+      "extra_list": [{}, {}]
+    }' > /dev/null 2>&1
+done
+
+# 3. 查看统计（应该显示 total_requests=3, cache_hits=2）
+curl http://localhost:8000/api/v1/metrics | jq '.metrics.service | {
+  total_requests,
+  total_samples_processed,
+  cache_hits,
+  cache_misses
+}'
+
+# 预期输出：
+# {
+#   "total_requests": 3,
+#   "total_samples_processed": 6,
+#   "cache_hits": 2,
+#   "cache_misses": 1
+# }
+```
+
+---
+
+## 测试和验证
+
+### 自动化测试
+
+#### 基础功能测试
+
+```bash
+# 运行完整测试套件
+cd deep_research/reward/api
+python test_metrics_fix.py
+```
+
+测试内容包括：
+1. **缓存命中统计** - 验证缓存命中时统计是否准确
+2. **并发请求统计** - 验证高并发场景下统计不丢失
+3. **混合场景测试** - 验证部分缓存命中 + 并发的情况
+
+#### 新增指标测试
+
+```bash
+# 测试新增统计维度
+python test_new_metrics.py
+```
+
+测试内容包括：
+1. **成功请求统计** - 验证 `success_requests` 和 `success_rate`
+2. **响应时间统计** - 验证 `avg_response_time` 包含所有请求
+3. **计算耗时范围** - 验证 `max_compute_time` 和 `min_compute_time`
+4. **日志导出功能** - 验证统计摘要自动导出到日志
+
+### 手动验证
+
+#### 验证1：缓存命中统计准确性
+
+```bash
+# 步骤1：清空缓存
+curl -X POST http://localhost:8000/api/v1/cache/clear
+
+# 步骤2：发送相同请求2次
+curl -X POST http://localhost:8000/api/v1/rewards/compute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "测试问题",
+    "response_list": ["响应1", "响应2"],
+    "messages_list": [[], []],
+    "extra_list": [{}, {}]
+  }' | jq
+
+# 再次发送相同请求
+curl -X POST http://localhost:8000/api/v1/rewards/compute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "测试问题",
+    "response_list": ["响应1", "响应2"],
+    "messages_list": [[], []],
+    "extra_list": [{}, {}]
+  }' | jq '.data.meta.cache_hit'
+
+# 步骤3：查看统计
+curl http://localhost:8000/api/v1/metrics | jq '.metrics.service | {
+  total_requests,
+  cache_hits,
+  cache_misses,
+  cache_hit_rate
+}'
+
+# 预期结果：
+# {
+#   "total_requests": 2,
+#   "cache_hits": 1,
+#   "cache_misses": 1,
+#   "cache_hit_rate": 0.5
+# }
+```
+
+#### 验证2：并发场景统计准确性
+
+```python
+# concurrent_test.py
+import asyncio
+import httpx
+
+async def send_request(client, i):
+    resp = await client.post(
+        "http://localhost:8000/api/v1/rewards/compute",
+        json={
+            "prompt": f"并发测试 {i}",
+            "response_list": ["响应1", "响应2"],
+            "messages_list": [[], []],
+            "extra_list": [{}, {}],
+        }
+    )
+    return resp.status_code
+
+async def main():
+    # 先清空统计
+    async with httpx.AsyncClient() as client:
+        await client.post("http://localhost:8000/api/v1/cache/clear")
+    
+    # 并发发送10个不同请求
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        tasks = [send_request(client, i) for i in range(10)]
+        results = await asyncio.gather(*tasks)
+    
+    print(f"成功: {sum(1 for r in results if r == 200)}/10")
+    
+    # 查看统计
+    async with httpx.AsyncClient() as client:
+        resp = await client.get("http://localhost:8000/api/v1/metrics")
+        metrics = resp.json()["metrics"]["service"]
+        print(f"total_requests: {metrics['total_requests']}")
+        print(f"total_samples_processed: {metrics['total_samples_processed']}")
+        assert metrics["total_requests"] == 10, "统计不准确！"
+        print("✅ 并发统计验证通过")
+
+asyncio.run(main())
+```
+
+运行测试：
+```bash
+python concurrent_test.py
+```
+
+#### 验证3：新增指标功能
+
+```bash
+# 发送一些请求后查看新增指标
+curl -s http://localhost:8000/api/v1/metrics | jq '.metrics.service | {
+  # 成功率指标
+  success_requests,
+  failed_requests,
+  success_rate,
+  
+  # 响应时间指标（包含所有请求）
+  avg_response_time_ms: (.avg_response_time * 1000),
+  total_response_time,
+  
+  # 计算耗时范围（仅缓存未命中）
+  avg_compute_time,
+  max_compute_time,
+  min_compute_time
+}'
+```
+
+### 性能基准测试
+
+#### 吞吐量测试
+
+```bash
+# 使用 Apache Bench 测试
+ab -n 100 -c 10 -p payload.json -T application/json \
+  http://localhost:8000/api/v1/rewards/compute
+
+# payload.json 内容：
+# {
+#   "prompt": "性能测试",
+#   "response_list": ["响应1", "响应2"],
+#   "messages_list": [[], []],
+#   "extra_list": [{}, {}]
+# }
+```
+
+#### 缓存效果测试
+
+```bash
+# 1. 清空缓存
+curl -X POST http://localhost:8000/api/v1/cache/clear
+
+# 2. 第一次请求（缓存未命中）
+time curl -X POST http://localhost:8000/api/v1/rewards/compute \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"缓存测试","response_list":["A","B"],"messages_list":[[],[]],"extra_list":[{},{}]}' \
+  > /dev/null 2>&1
+
+# 3. 第二次请求（缓存命中）
+time curl -X POST http://localhost:8000/api/v1/rewards/compute \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"缓存测试","response_list":["A","B"],"messages_list":[[],[]],"extra_list":[{},{}]}' \
+  > /dev/null 2>&1
+
+# 对比两次时间差异（缓存命中应该快很多）
+```
+
+### 日志验证
+
+查看服务端日志验证统计摘要是否正确导出：
+
+```bash
+# 方法1：实时查看日志
+tail -f <日志文件路径> | grep "统计摘要"
+
+# 方法2：查看最近的统计日志
+grep "📊 统计摘要" <日志文件路径> | tail -20
+
+# 方法3：如果日志输出到终端，直接查看运行服务的终端
+```
+
+预期看到如下格式的日志：
+```
+INFO: 📊 统计摘要 [总计] 请求: 50 (成功: 49, 失败: 1), 样本: 500, 缓存命中率: 60.0%
+INFO: 📊 统计摘要 [性能] 平均响应: 235.6ms, 平均计算: 2.15s, 最大计算: 5.32s, 最小计算: 1.02s
+INFO: 📊 统计摘要 [本次] 样本: 10, 计算: 2.08s, 响应: 2.11s
+```
+
+### 常见测试问题
+
+#### Q: 测试时统计不准确？
+
+**可能原因**：
+1. 服务代码未更新 - 检查是否包含 `metrics_lock`
+2. 服务未重启 - 重启服务使更新生效
+3. 缓存未清空 - 使用 `/api/v1/cache/clear` 清空
+
+**解决方法**：
+```bash
+# 1. 确认代码已更新
+grep "metrics_lock" deep_research/reward/api/core/reward_service.py
+
+# 2. 重启服务
+# 停止旧服务（Ctrl+C）
+python -m uvicorn deep_research.reward.api.main:app --reload
+
+# 3. 清空缓存和统计
+curl -X POST http://localhost:8000/api/v1/cache/clear
+```
+
+#### Q: 并发测试失败？
+
+可能是并发数过高，调整测试参数：
+```python
+# 降低并发数
+tasks = [send_request(client, i) for i in range(5)]  # 从10降到5
+
+# 增加超时时间
+async with httpx.AsyncClient(timeout=120.0) as client:
+```
+
+#### Q: 日志中看不到统计摘要？
+
+检查日志级别：
+```bash
+# 设置为 INFO 或 DEBUG
+LOG_LEVEL=INFO
+
+# 重启服务
+```
 
 ---
 
@@ -967,6 +1379,103 @@ kill <PID>
 2. 检查单个任务的处理时间是否过长
 3. 考虑提高 `MAX_QUEUE_SIZE` 允许更多任务排队
 4. 如果使用Redis缓存，可以增加 `UVICORN_WORKERS` 多进程并发
+
+#### 统计数据不准确
+
+**问题描述**：`/api/v1/metrics` 返回的统计数据与实际发送的请求数不符。
+
+**常见原因**：
+
+1. **缓存命中导致的统计遗漏**（已修复）
+   - 早期版本缓存命中时不统计请求数
+   - 解决：更新到最新版本，统计已前置到函数入口
+
+2. **并发竞争导致的统计丢失**（已修复）
+   - 高并发下 `+=` 操作不是原子的
+   - 解决：使用 `asyncio.Lock` 保护统计更新
+
+3. **服务重启导致统计重置**
+   - 统计数据存储在内存中，重启后清零
+   - 这是正常行为，可以通过查看日志中的历史统计
+
+**诊断步骤**：
+
+```bash
+# 1. 检查代码版本（应该包含修复）
+grep "metrics_lock" deep_research/reward/api/core/reward_service.py
+# 应该能找到这一行
+
+# 2. 清空缓存并重置统计
+curl -X POST http://localhost:8000/api/v1/cache/clear
+
+# 3. 发送3个相同请求
+for i in {1..3}; do
+  curl -s -X POST http://localhost:8000/api/v1/rewards/compute \
+    -H "Content-Type: application/json" \
+    -d '{
+      "prompt": "测试",
+      "response_list": ["A", "B"],
+      "messages_list": [[], []],
+      "extra_list": [{}, {}]
+    }' > /dev/null
+done
+
+# 4. 查看统计
+curl -s http://localhost:8000/api/v1/metrics | jq '.metrics.service | {
+  total_requests,
+  cache_hits,
+  cache_misses
+}'
+
+# 5. 验证结果
+# 预期：total_requests=3, cache_hits=2, cache_misses=1
+```
+
+**如果统计仍然不准**：
+
+```bash
+# 1. 确认服务版本
+git log --oneline deep_research/reward/api/core/reward_service.py | head -5
+
+# 2. 完全重启服务
+pkill -f "uvicorn.*reward.*api"
+sleep 2
+python -m uvicorn deep_research.reward.api.main:app --reload
+
+# 3. 运行测试脚本验证
+python deep_research/reward/api/test_metrics_fix.py
+```
+
+#### 统计指标理解错误
+
+**问题：为什么 avg_compute_time > avg_response_time？**
+
+这是**不可能**的，如果出现说明有bug。正确关系应该是：
+```
+avg_response_time < avg_compute_time
+```
+
+原因：
+- `avg_response_time` 统计**所有请求**（包括快速的缓存命中）
+- `avg_compute_time` 仅统计**缓存未命中**的请求（实际计算）
+- 缓存命中响应时间极短（< 10ms），拉低了平均响应时间
+
+**问题：min_compute_time 为什么是 0？**
+
+两种情况：
+1. 服务刚启动，还没有任何计算（初始值 `float('inf')` 转换为 `0.0`）
+2. 某次计算确实非常快（如空样本）
+
+验证方法：
+```bash
+curl -s http://localhost:8000/api/v1/metrics | jq '.metrics.service | {
+  total_requests,
+  cache_misses,
+  min_compute_time
+}'
+
+# 如果 cache_misses = 0，说明还没有实际计算过
+```
 
 ### 依赖故障
 
@@ -1057,5 +1566,118 @@ python deep_research/reward/api/example_client.py
 - HTTPS/TLS
 - 速率限制（Rate Limiting）
 - IP白名单
+
+---
+
+## 更新日志
+
+### v1.1.0 (2025-12-18) - 统计系统改进
+
+#### ✅ 修复的问题
+
+1. **缓存命中时统计遗漏** 
+   - **问题**：缓存命中的请求不计入 `total_requests` 和 `total_samples_processed`
+   - **影响**：高缓存命中率时统计严重偏低（如75%命中率导致统计少75%）
+   - **修复**：将统计更新前置到函数入口，所有请求都会被统计
+
+2. **并发竞争导致统计丢失**
+   - **问题**：高并发下 `+=` 操作不是原子的，导致统计值丢失
+   - **影响**：并发场景下统计不准确，随机丢失更新
+   - **修复**：使用 `asyncio.Lock` 保护所有统计更新操作
+
+#### ✨ 新增功能
+
+1. **失败请求统计**
+   - 新增 `failed_requests` 指标跟踪计算失败的请求
+   - 新增 `success_requests` 和 `success_rate` 评估服务健康度
+   
+2. **响应时间统计**
+   - 新增 `total_response_time` 统计完整响应时间（包含缓存查询）
+   - 新增 `avg_response_time` 反映真实用户体验
+   - 区分响应时间（所有请求）和计算时间（仅缓存未命中）
+
+3. **计算耗时范围**
+   - 新增 `max_compute_time` 记录历史最长计算时间
+   - 新增 `min_compute_time` 记录历史最短计算时间
+   - 帮助识别性能异常和优化空间
+
+4. **自动日志导出**
+   - 在持久化保存后自动导出统计摘要到日志
+   - 三段式日志格式：[总计]、[性能]、[本次]
+   - 方便实时监控和问题排查
+
+#### 🔧 改进的指标
+
+| 指标 | 改进前 | 改进后 |
+|-----|--------|--------|
+| `total_requests` | 仅统计缓存未命中 | 统计所有请求 ✓ |
+| `total_samples_processed` | 仅统计缓存未命中 | 统计所有样本 ✓ |
+| `cache_hit_rate` | 可能不准确 | 准确率 100% ✓ |
+| `avg_compute_time` | 含义不清 | 明确为缓存未命中平均 ✓ |
+| `avg_response_time` | 不存在 | 新增，反映真实体验 ✨ |
+| `success_rate` | 不存在 | 新增，健康度指标 ✨ |
+
+#### 📊 统计对比
+
+**改进前**（缓存命中率75%的场景）：
+```json
+{
+  "total_requests": 25,           // ❌ 实际是100
+  "total_samples_processed": 250, // ❌ 实际是1000
+  "cache_hits": 75,
+  "cache_misses": 25
+}
+```
+
+**改进后**：
+```json
+{
+  "total_requests": 100,           // ✓ 准确
+  "success_requests": 98,          // ✨ 新增
+  "failed_requests": 2,            // ✨ 新增
+  "success_rate": 0.98,            // ✨ 新增
+  "total_samples_processed": 1000, // ✓ 准确
+  "cache_hits": 75,
+  "cache_misses": 25,
+  "cache_hit_rate": 0.75,
+  "avg_response_time": 0.156,      // ✨ 新增（秒）
+  "avg_compute_time": 2.35,        // ✓ 准确
+  "max_compute_time": 5.21,        // ✨ 新增
+  "min_compute_time": 0.89         // ✨ 新增
+}
+```
+
+#### 🔄 迁移指南
+
+**无需任何代码改动**，只需：
+
+1. 重启服务使更新生效：
+```bash
+# 停止旧服务（Ctrl+C）
+python -m uvicorn deep_research.reward.api.main:app --reload
+```
+
+2. 清空缓存重置统计（可选）：
+```bash
+curl -X POST http://localhost:8000/api/v1/cache/clear
+```
+
+3. 验证统计准确性：
+```bash
+python deep_research/reward/api/test_metrics_fix.py
+```
+
+**向后兼容**：
+- 所有原有指标保持不变
+- 仅新增指标，不删除或修改现有字段
+- API接口完全兼容
+
+#### 📝 相关文档
+
+- `METRICS_FIX.md` - 问题详细分析和修复方案
+- `NEW_METRICS_GUIDE.md` - 新增统计维度说明
+- `TESTING_GUIDE.md` - 测试和验证指南
+- `test_metrics_fix.py` - 自动化测试脚本
+- `test_new_metrics.py` - 新功能测试脚本
 
 ---

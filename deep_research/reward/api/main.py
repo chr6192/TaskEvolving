@@ -268,7 +268,7 @@ async def compute_rewards_async(request: AsyncComputeRequest):
         queue_stats = task_queue.get_stats()
         avg_time = 30.0  # 默认估算30秒
         if reward_service:
-            metrics = reward_service.get_metrics()
+            metrics = await reward_service.get_metrics()
             if metrics.get("avg_compute_time"):
                 avg_time = metrics["avg_compute_time"]
         
@@ -373,7 +373,7 @@ async def get_metrics():
         metrics = {}
         
         if reward_service:
-            metrics["service"] = reward_service.get_metrics()
+            metrics["service"] = await reward_service.get_metrics()
         
         if task_queue:
             metrics["queue"] = task_queue.get_stats()
@@ -408,7 +408,7 @@ async def clear_cache():
         
         # 重置服务指标
         if reward_service:
-            reward_service.reset_metrics()
+            await reward_service.reset_metrics()
         
         return {
             "success": True,

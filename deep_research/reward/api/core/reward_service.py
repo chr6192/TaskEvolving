@@ -64,7 +64,14 @@ class RewardComputeService:
             "cache_misses": 0,
             "total_compute_time": 0.0,
             "total_samples_processed": 0,
+            "failed_requests": 0,
+            "total_response_time": 0.0,
+            "max_compute_time": 0.0,
+            "min_compute_time": float('inf'),
         }
+        
+        # 指标更新锁（保证统计的线程安全）
+        self.metrics_lock = asyncio.Lock()
         
         logger.info(
             f"RewardComputeService 初始化完成: "
@@ -115,11 +122,13 @@ class RewardComputeService:
         try:
             result = await self.cache_backend.get(cache_key)
             if result:
-                self.metrics["cache_hits"] += 1
+                async with self.metrics_lock:
+                    self.metrics["cache_hits"] += 1
                 logger.info(f"缓存命中: {cache_key[:16]}...")
                 return result
             else:
-                self.metrics["cache_misses"] += 1
+                async with self.metrics_lock:
+                    self.metrics["cache_misses"] += 1
         except Exception as e:
             logger.warning(f"从缓存获取结果失败: {e}")
         
@@ -135,6 +144,74 @@ class RewardComputeService:
             logger.debug(f"结果已缓存: {cache_key[:16]}...")
         except Exception as e:
             logger.warning(f"保存到缓存失败: {e}")
+    
+    async def _log_metrics_summary(
+        self, 
+        sample_count: int,
+        compute_time: float,
+        total_response_time: float
+    ):
+        """
+        导出统计数据到日志（在持久化保存后调用）
+        
+        Args:
+            sample_count: 本次请求的样本数
+            compute_time: 本次计算耗时
+            total_response_time: 本次总响应耗时
+        """
+        async with self.metrics_lock:
+            metrics_snapshot = self.metrics.copy()
+        
+        # 计算衍生指标
+        total_requests = metrics_snapshot["total_requests"]
+        cache_hits = metrics_snapshot["cache_hits"]
+        cache_misses = metrics_snapshot["cache_misses"]
+        failed_requests = metrics_snapshot["failed_requests"]
+        
+        # 成功请求数 = 总请求 - 失败请求
+        success_requests = total_requests - failed_requests
+        
+        # 缓存命中率
+        total_cache_checks = cache_hits + cache_misses
+        cache_hit_rate = cache_hits / total_cache_checks if total_cache_checks > 0 else 0.0
+        
+        # 平均计算耗时（只计算缓存未命中的）
+        avg_compute_time = (
+            metrics_snapshot["total_compute_time"] / cache_misses 
+            if cache_misses > 0 else 0.0
+        )
+        
+        # 平均响应耗时（包含所有请求）
+        avg_response_time = (
+            metrics_snapshot["total_response_time"] / total_requests 
+            if total_requests > 0 else 0.0
+        )
+        
+        # 最小计算耗时（处理初始值）
+        min_compute_time = metrics_snapshot["min_compute_time"]
+        if min_compute_time == float('inf'):
+            min_compute_time = 0.0
+        
+        # 导出到日志
+        logger.info(
+            f"📊 统计摘要 [总计] "
+            f"请求: {total_requests} (成功: {success_requests}, 失败: {failed_requests}), "
+            f"样本: {metrics_snapshot['total_samples_processed']}, "
+            f"缓存命中率: {cache_hit_rate:.1%}"
+        )
+        logger.info(
+            f"📊 统计摘要 [性能] "
+            f"平均响应: {avg_response_time*1000:.1f}ms, "
+            f"平均计算: {avg_compute_time:.2f}s, "
+            f"最大计算: {metrics_snapshot['max_compute_time']:.2f}s, "
+            f"最小计算: {min_compute_time:.2f}s"
+        )
+        logger.info(
+            f"📊 统计摘要 [本次] "
+            f"样本: {sample_count}, "
+            f"计算: {compute_time:.2f}s, "
+            f"响应: {total_response_time:.2f}s"
+        )
     
     async def compute_single_group(
         self,
@@ -160,12 +237,30 @@ class RewardComputeService:
         if config is None:
             config = {}
         
+        # 统计：记录每个请求（无论是否缓存命中）
+        sample_count = len(response_list)
+        request_start_time = time.perf_counter()  # 记录请求开始时间（包含缓存查询）
+        
+        async with self.metrics_lock:
+            self.metrics["total_requests"] += 1
+            self.metrics["total_samples_processed"] += sample_count
+        
         # 生成缓存key
         cache_key = self._generate_cache_key(prompt, response_list, messages_list, extra_list, config)
         
         # 尝试从缓存获取
         cached_result = await self._get_from_cache(cache_key)
         if cached_result is not None:
+            # 更新缓存命中的meta信息
+            if isinstance(cached_result, dict) and "meta" in cached_result:
+                cached_result["meta"]["cache_hit"] = True
+            
+            # 统计缓存命中的响应时间
+            response_time = time.perf_counter() - request_start_time
+            async with self.metrics_lock:
+                self.metrics["total_response_time"] += response_time
+            
+            logger.info(f"缓存命中返回: {sample_count} 个样本, 响应耗时 {response_time*1000:.2f}ms")
             return cached_result
         
         # 并发控制
@@ -225,19 +320,38 @@ class RewardComputeService:
                     details=details,
                 )
                 
-                # 更新指标
-                self.metrics["total_requests"] += 1
-                self.metrics["total_compute_time"] += compute_time
-                self.metrics["total_samples_processed"] += len(response_list)
+                # 计算总响应时间（包含所有处理时间）
+                total_response_time = time.perf_counter() - request_start_time
+                
+                # 更新统计指标（请求数和样本数已在函数开头统计）
+                async with self.metrics_lock:
+                    self.metrics["total_compute_time"] += compute_time
+                    self.metrics["total_response_time"] += total_response_time
+                    # 更新最大/最小计算时间
+                    if compute_time > self.metrics["max_compute_time"]:
+                        self.metrics["max_compute_time"] = compute_time
+                    if compute_time < self.metrics["min_compute_time"]:
+                        self.metrics["min_compute_time"] = compute_time
+                
+                # 导出统计数据到日志（在持久化后）
+                await self._log_metrics_summary(
+                    sample_count=sample_count,
+                    compute_time=compute_time,
+                    total_response_time=total_response_time
+                )
                 
                 logger.info(
-                    f"计算完成: {len(response_list)} 个样本, "
-                    f"耗时 {compute_time:.2f}s"
+                    f"计算完成: {sample_count} 个样本, "
+                    f"计算耗时 {compute_time:.2f}s, 总响应耗时 {total_response_time:.2f}s"
                 )
                 
                 return result_dict
                 
             except Exception as e:
+                # 统计失败请求
+                async with self.metrics_lock:
+                    self.metrics["failed_requests"] += 1
+                
                 logger.error(f"计算奖励时发生错误: {e}", exc_info=True)
                 raise
     
@@ -294,31 +408,58 @@ class RewardComputeService:
         
         return processed_results
     
-    def get_metrics(self) -> Dict[str, Any]:
+    async def get_metrics(self) -> Dict[str, Any]:
         """获取服务指标"""
-        metrics = self.metrics.copy()
+        async with self.metrics_lock:
+            metrics = self.metrics.copy()
         
-        # 计算平均值
-        if metrics["total_requests"] > 0:
-            metrics["avg_compute_time"] = metrics["total_compute_time"] / metrics["total_requests"]
-            metrics["avg_samples_per_request"] = metrics["total_samples_processed"] / metrics["total_requests"]
-            
-            if metrics["cache_hits"] + metrics["cache_misses"] > 0:
-                metrics["cache_hit_rate"] = metrics["cache_hits"] / (metrics["cache_hits"] + metrics["cache_misses"])
+        # 计算衍生指标
+        total_requests = metrics["total_requests"]
+        cache_hits = metrics["cache_hits"]
+        cache_misses = metrics["cache_misses"]
+        failed_requests = metrics["failed_requests"]
+        
+        # 成功请求数
+        success_requests = total_requests - failed_requests
+        metrics["success_requests"] = success_requests
+        metrics["success_rate"] = success_requests / total_requests if total_requests > 0 else 0.0
+        
+        # 平均响应时间（所有请求）
+        if total_requests > 0:
+            metrics["avg_response_time"] = metrics["total_response_time"] / total_requests
+            metrics["avg_samples_per_request"] = metrics["total_samples_processed"] / total_requests
+        
+        # 平均计算时间（仅缓存未命中的）
+        if cache_misses > 0:
+            metrics["avg_compute_time"] = metrics["total_compute_time"] / cache_misses
+        
+        # 缓存命中率
+        total_cache_checks = cache_hits + cache_misses
+        if total_cache_checks > 0:
+            metrics["cache_hit_rate"] = cache_hits / total_cache_checks
+        
+        # 处理最小计算时间的初始值
+        if metrics["min_compute_time"] == float('inf'):
+            metrics["min_compute_time"] = 0.0
         
         # 添加持久化统计
         metrics["persistence"] = self.persistence.get_stats()
         
         return metrics
     
-    def reset_metrics(self):
-        """重置指标"""
-        self.metrics = {
-            "total_requests": 0,
-            "cache_hits": 0,
-            "cache_misses": 0,
-            "total_compute_time": 0.0,
-            "total_samples_processed": 0,
-        }
+    async def reset_metrics(self):
+        """重置指标（带锁保护）"""
+        async with self.metrics_lock:
+            self.metrics = {
+                "total_requests": 0,
+                "cache_hits": 0,
+                "cache_misses": 0,
+                "total_compute_time": 0.0,
+                "total_samples_processed": 0,
+                "failed_requests": 0,
+                "total_response_time": 0.0,
+                "max_compute_time": 0.0,
+                "min_compute_time": float('inf'),
+            }
         logger.info("指标已重置")
 

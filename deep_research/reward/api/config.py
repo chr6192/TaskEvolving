@@ -24,17 +24,17 @@ class Settings(BaseSettings):
     
     # ========== 并发控制 ==========
     max_concurrent_groups: int = Field(
-        default=10,
+        default=5096,
         env="MAX_CONCURRENT_GROUPS",
         description="最大并发group数量"
     )
     num_task_processors: int = Field(
-        default=8,
+        default=128,
         env="NUM_TASK_PROCESSORS",
         description="进程内异步任务处理器数量"
     )
     max_queue_size: int = Field(
-        default=1000,
+        default=512,
         env="MAX_QUEUE_SIZE",
         description="最大队列大小"
     )

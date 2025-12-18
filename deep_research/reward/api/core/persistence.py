@@ -50,12 +50,19 @@ class SamplePersistence:
     def _get_sample_file(self, unique_id: str) -> Path:
         """
         获取样本文件路径
-        文件名包含unique_id
+        文件名包含unique_id，并按日期分目录存储
         """
+        # 获取当前日期戳 (格式: YYYY-MM-DD)
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        
+        # 创建日期子目录
+        date_dir = self.base_dir / date_str
+        date_dir.mkdir(parents=True, exist_ok=True)
+        
         # 清理 unique_id 中的特殊字符
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in unique_id)
         filename = f"sample_{safe_id}.jsonl"
-        return self.base_dir / filename
+        return date_dir / filename
     
     async def save_sample_pair(
         self,
@@ -167,7 +174,11 @@ class SamplePersistence:
             return {"enabled": False}
         
         try:
-            files = list(self.base_dir.glob("sample_*.jsonl"))
+            # 递归查找所有日期子目录中的样本文件
+            files = list(self.base_dir.glob("*/sample_*.jsonl"))
+            # 也包含根目录下的文件（兼容旧数据）
+            files.extend(self.base_dir.glob("sample_*.jsonl"))
+            
             total_samples = 0
             
             for file in files:

@@ -69,7 +69,7 @@ OPENAI_API_KEY=your_api_key_here
 ```bash
 OPENAI_API_KEY=your_api_key_here
 MAX_CONCURRENT_GROUPS=10
-NUM_TASK_PROCESSORS=4
+NUM_TASK_PROCESSORS=8
 UVICORN_WORKERS=1
 CACHE_TYPE=memory
 LOG_LEVEL=INFO
@@ -87,6 +87,17 @@ python -m deep_research.reward.api.main
 # 方式3: 开发模式（支持热重载）
 bash deep_research/reward/api/start_dev.sh
 ```
+
+**开发模式 vs 生产模式对比**：
+
+| 特性 | 开发模式 (start_dev.sh) | 生产模式 (start.sh) |
+|------|------------------------|-------------------|
+| 热重载 | ✅ `--reload` | ❌ 不启用 |
+| Workers | 固定为 1 | 可配置多个 (默认1) |
+| 日志级别 | DEBUG | INFO |
+| 调试模式 | API_DEBUG=true | API_DEBUG=false |
+| 适用场景 | 本地开发、快速迭代 | 生产部署、高并发 |
+| 文件监控 | 自动重启 | 需手动重启 |
 
 #### 4️⃣ 验证服务（1分钟）
 
@@ -340,9 +351,10 @@ with open(sample_file, "r", encoding="utf-8") as f:
 |--------|--------|------|
 | `API_HOST` | `0.0.0.0` | 服务监听地址 |
 | `API_PORT` | `8000` | 服务端口 |
+| `API_DEBUG` | `false` | 调试模式 |
 | `MAX_CONCURRENT_GROUPS` | `10` | 最大并发group数量 |
-| `NUM_TASK_PROCESSORS` | `4` | 进程内异步任务处理器数量 |
-| `UVICORN_WORKERS` | `1` | Uvicorn多进程worker数量 |
+| `NUM_TASK_PROCESSORS` | `8` | 进程内异步任务处理器数量 |
+| `UVICORN_WORKERS` | `1` | Uvicorn多进程worker数量（仅生产模式） |
 | `MAX_QUEUE_SIZE` | `1000` | 最大队列大小 |
 | `ENABLE_CACHE` | `true` | 是否启用缓存 |
 | `CACHE_TYPE` | `memory` | 缓存类型 (memory/redis) |
@@ -350,8 +362,56 @@ with open(sample_file, "r", encoding="utf-8") as f:
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis连接URL |
 | `ENABLE_PERSISTENCE` | `true` | 是否启用数据持久化 |
 | `PERSISTENCE_DIR` | `./data/reward_samples` | 数据持久化目录 |
-| `LOG_LEVEL` | `INFO` | 日志级别 |
+| `LOG_LEVEL` | `INFO` | 日志级别 (DEBUG/INFO/WARNING/ERROR) |
+| `LOG_FILE` | - | 日志文件路径（可选） |
 | `OPENAI_API_KEY` | - | OpenAI API Key (必填) |
+| `OPENAI_BASE_URL` | `https://dashscope.aliyuncs.com/...` | OpenAI API Base URL |
+
+### 配置默认值对照表
+
+以下是所有配置项的详细默认值，来自 `config.py` 的定义：
+
+#### 服务配置
+
+| 配置项 | 默认值 | 来源 | 说明 |
+|--------|--------|------|------|
+| `API_HOST` | `0.0.0.0` | config.py | 监听所有网络接口 |
+| `API_PORT` | `8000` | config.py | 标准HTTP端口 |
+| `API_DEBUG` | `false` | config.py | 生产模式关闭调试 |
+| `LOG_LEVEL` | `INFO` | config.py | 标准日志级别 |
+| `LOG_FILE` | `None` | config.py | 不写入文件，输出到终端 |
+
+#### 并发控制
+
+| 配置项 | 默认值 | 来源 | 说明 |
+|--------|--------|------|------|
+| `MAX_CONCURRENT_GROUPS` | `10` | config.py | 单进程同时处理的group数 |
+| `NUM_TASK_PROCESSORS` | `8` | config.py | 进程内异步协程数 |
+| `MAX_QUEUE_SIZE` | `1000` | config.py | 异步任务队列容量 |
+| `UVICORN_WORKERS` | `1` | start.sh | 仅生产模式使用，开发模式固定为1 |
+
+#### 缓存配置
+
+| 配置项 | 默认值 | 来源 | 说明 |
+|--------|--------|------|------|
+| `ENABLE_CACHE` | `true` | config.py | 启用结果缓存 |
+| `CACHE_TYPE` | `memory` | config.py | 内存缓存（单机） |
+| `CACHE_MAX_SIZE` | `10000` | config.py | LRU缓存容量 |
+| `REDIS_URL` | `redis://localhost:6379/0` | config.py | Redis缓存连接 |
+
+#### 持久化配置
+
+| 配置项 | 默认值 | 来源 | 说明 |
+|--------|--------|------|------|
+| `ENABLE_PERSISTENCE` | `true` | config.py | 启用样本持久化 |
+| `PERSISTENCE_DIR` | `./data/reward_samples` | config.py | 相对项目根目录 |
+
+#### OpenAI配置
+
+| 配置项 | 默认值 | 来源 | 说明 |
+|--------|--------|------|------|
+| `OPENAI_API_KEY` | `None` | config.py | **必须配置** |
+| `OPENAI_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | config.py | 阿里云兼容接口 |
 
 ### 并发控制策略
 
@@ -382,7 +442,7 @@ with open(sample_file, "r", encoding="utf-8") as f:
 **使用内存缓存时（开发/测试）**：
 ```bash
 UVICORN_WORKERS=1  # 必须为1
-NUM_TASK_PROCESSORS=4
+NUM_TASK_PROCESSORS=8
 MAX_CONCURRENT_GROUPS=10
 CACHE_TYPE=memory
 ```

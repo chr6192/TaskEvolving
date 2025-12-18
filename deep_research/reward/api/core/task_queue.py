@@ -3,13 +3,14 @@
 支持异步任务提交、查询和结果存储
 """
 import asyncio
-import json
 import logging
 import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
 from dataclasses import dataclass, asdict
+
+from .hash_utils import compute_reward_input_hash, TASK_HASH_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -65,14 +66,16 @@ class TaskQueue:
     - 支持任务提交、查询、结果存储
     """
     
-    def __init__(self, cache_backend=None, max_queue_size: int = 1000):
+    def __init__(self, cache_backend=None, max_queue_size: int = 1000, task_retention_seconds: int = 3600):
         """
         Args:
             cache_backend: 缓存后端（用于持久化任务状态）
             max_queue_size: 最大队列大小
+            task_retention_seconds: 已完成任务在内存中保留的时间（秒），默认1小时
         """
         self.cache_backend = cache_backend
         self.max_queue_size = max_queue_size
+        self.task_retention_seconds = task_retention_seconds
         
         # 内存队列（用于快速访问）
         self.queue = asyncio.Queue(maxsize=max_queue_size)
@@ -80,16 +83,53 @@ class TaskQueue:
         
         # 后台任务处理器
         self.processor_tasks = []
+        self.cleaner_task = None  # 内存清理任务
         self.is_running = False
         
-        logger.info(f"TaskQueue 初始化: max_queue_size={max_queue_size}")
+        logger.info(
+            f"TaskQueue 初始化: max_queue_size={max_queue_size}, "
+            f"task_retention={task_retention_seconds}s"
+        )
+    
+    @staticmethod
+    def _compute_task_data_hash(
+        prompt: str,
+        response_list: list,
+        messages_list: list,
+        extra_list: list,
+        config: dict
+    ) -> str:
+        """
+        计算任务数据的hash值（用于任务去重和ID生成）
+        
+        Args:
+            prompt: 问题文本
+            response_list: 响应列表
+            messages_list: 消息列表
+            extra_list: 额外信息列表
+            config: 配置参数
+            
+        Returns:
+            16位hex hash字符串
+            
+        Note:
+            使用统一的hash工具函数，确保与 RewardService 使用相同的hash算法。
+        """
+        return compute_reward_input_hash(
+            prompt=prompt,
+            response_list=response_list,
+            messages_list=messages_list,
+            extra_list=extra_list,
+            config=config,
+            length=TASK_HASH_LENGTH,
+        )
     
     async def submit_task(
         self,
         prompt: str,
-        responses: list,
-        messages: list,
-        extras: list,
+        response_list: list,
+        messages_list: list,
+        extra_list: list,
         config: Optional[dict] = None,
         task_id: Optional[str] = None,
     ) -> str:
@@ -97,36 +137,40 @@ class TaskQueue:
         提交任务
         
         Args:
-            prompt, responses, messages, extras: 计算奖励所需的输入
+            prompt, response_list, messages_list, extra_list: 计算奖励所需的输入
             config: 配置参数
-            task_id: 可选的自定义任务ID（用于幂等性）
+            task_id: 可选的自定义任务ID前缀
             
         Returns:
-            任务ID
+            实际使用的任务ID (原task_id-hash)
         """
         if config is None:
             config = {}
         
-        # 生成或使用提供的task_id
+        # 生成或使用提供的task_id作为前缀
         if task_id is None:
             task_id = str(uuid.uuid4())
         
-        # 检查任务是否已存在（幂等性）
-        if task_id in self.tasks:
-            logger.info(f"任务已存在: {task_id}")
-            return task_id
+        # 计算数据hash并生成最终task_id
+        data_hash = self._compute_task_data_hash(prompt, response_list, messages_list, extra_list, config)
+        final_task_id = f"{task_id}-{data_hash}"
+        
+        # 检查最终task_id是否已存在（相同数据的重复提交）
+        if final_task_id in self.tasks:
+            logger.info(f"任务已存在（相同数据）: {final_task_id}")
+            return final_task_id
         
         # 创建任务
         now = datetime.now().isoformat()
         task = Task(
-            task_id=task_id,
+            task_id=final_task_id,
             status=TaskStatus.PENDING,
             created_at=now,
             updated_at=now,
             prompt=prompt,
-            response_list=responses,
-            messages_list=messages,
-            extra_list=extras,
+            response_list=response_list,
+            messages_list=messages_list,
+            extra_list=extra_list,
             config=config,
         )
         
@@ -135,14 +179,14 @@ class TaskQueue:
             raise ValueError(f"任务队列已满（最大 {self.max_queue_size} 个任务）")
         
         # 保存任务状态
-        self.tasks[task_id] = task
+        self.tasks[final_task_id] = task
         await self._save_task(task)
         
         # 加入队列
-        await self.queue.put(task_id)
+        await self.queue.put(final_task_id)
         
-        logger.info(f"任务已提交: {task_id}, 队列大小: {self.queue.qsize()}")
-        return task_id
+        logger.info(f"任务已提交: {final_task_id}, 队列大小: {self.queue.qsize()}")
+        return final_task_id
     
     async def get_task_status(self, task_id: str) -> Optional[dict]:
         """
@@ -161,7 +205,13 @@ class TaskQueue:
         if task is None and self.cache_backend:
             task = await self._load_task(task_id)
             if task:
-                self.tasks[task_id] = task
+                # 只有正在进行的任务才重新加载到内存
+                # 已完成/失败的任务直接返回，不占用内存
+                if task.status in [TaskStatus.PENDING, TaskStatus.PROCESSING]:
+                    self.tasks[task_id] = task
+                    logger.debug(f"从缓存恢复进行中的任务到内存: {task_id}")
+                else:
+                    logger.debug(f"从缓存查询已完成任务（不加载到内存）: {task_id}")
         
         if task is None:
             return None
@@ -252,6 +302,10 @@ class TaskQueue:
                 self._task_processor(f"processor-{i}", reward_service)
             )
             self.processor_tasks.append(processor)
+        
+        # 启动内存清理任务
+        logger.info(f"启动内存清理任务（每{self.task_retention_seconds}秒清理一次）")
+        self.cleaner_task = asyncio.create_task(self._memory_cleaner())
     
     async def stop_processors(self):
         """停止后台异步任务处理器"""
@@ -265,9 +319,15 @@ class TaskQueue:
         for task in self.processor_tasks:
             task.cancel()
         
+        # 取消内存清理任务
+        if self.cleaner_task:
+            self.cleaner_task.cancel()
+        
         # 等待所有任务完成
-        await asyncio.gather(*self.processor_tasks, return_exceptions=True)
+        all_tasks = self.processor_tasks + ([self.cleaner_task] if self.cleaner_task else [])
+        await asyncio.gather(*all_tasks, return_exceptions=True)
         self.processor_tasks.clear()
+        self.cleaner_task = None
         
         logger.info("异步任务处理器已停止")
     
@@ -360,6 +420,52 @@ class TaskQueue:
                 logger.error(f"{processor_name} 发生错误: {e}", exc_info=True)
         
         logger.info(f"{processor_name} 已停止")
+    
+    async def _memory_cleaner(self):
+        """
+        内存清理任务
+        定期清理已完成/失败的任务，防止内存泄漏
+        """
+        logger.info("内存清理任务已启动")
+        
+        while self.is_running:
+            try:
+                # 每60秒检查一次
+                await asyncio.sleep(60)
+                
+                if not self.is_running:
+                    break
+                
+                from datetime import datetime, timedelta
+                now = datetime.now()
+                retention_delta = timedelta(seconds=self.task_retention_seconds)
+                
+                # 找到需要清理的任务
+                tasks_to_remove = []
+                for task_id, task in self.tasks.items():
+                    # 只清理已完成或失败的任务
+                    if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+                        # 检查任务是否超过保留时间
+                        updated_at = datetime.fromisoformat(task.updated_at)
+                        if now - updated_at > retention_delta:
+                            tasks_to_remove.append(task_id)
+                
+                # 清理任务
+                if tasks_to_remove:
+                    for task_id in tasks_to_remove:
+                        del self.tasks[task_id]
+                    logger.info(
+                        f"内存清理: 移除 {len(tasks_to_remove)} 个已完成/失败的任务, "
+                        f"当前内存任务数: {len(self.tasks)}"
+                    )
+                
+            except asyncio.CancelledError:
+                logger.info("内存清理任务被取消")
+                break
+            except Exception as e:
+                logger.error(f"内存清理任务发生错误: {e}", exc_info=True)
+        
+        logger.info("内存清理任务已停止")
     
     def get_stats(self) -> dict:
         """获取队列统计信息"""

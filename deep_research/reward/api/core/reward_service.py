@@ -3,14 +3,13 @@
 封装 compute_score_async，提供高并发异步计算能力
 """
 import asyncio
-import hashlib
-import json
 import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
 from .persistence import SamplePersistence
+from .hash_utils import compute_reward_input_hash
 
 logger = logging.getLogger(__name__)
 
@@ -83,29 +82,30 @@ class RewardComputeService:
         config: dict
     ) -> str:
         """
-        生成缓存key
-        使用输入数据的hash作为key
-        """
-        # 构建用于hash的数据结构
-        cache_data = {
-            "prompt": prompt,
-            "response_list": response_list,
-            "messages_list": messages_list,
-            # extra_list可能包含大量数据，只取关键字段
-            "extras_keys": [
-                {
-                    "skeleton_id": e.get("skeleton_id", ""),
-                    "trajectory_id": e.get("trajectory_id", ""),
-                }
-                for e in extra_list
-            ],
-            "config": config,
-        }
+        生成缓存key（用于结果缓存）
         
-        # 序列化并计算hash
-        cache_str = json.dumps(cache_data, sort_keys=True, ensure_ascii=False)
-        cache_key = hashlib.sha256(cache_str.encode()).hexdigest()
-        return f"reward:compute:{cache_key}"
+        Args:
+            prompt: 问题文本
+            response_list: 响应列表
+            messages_list: 消息列表
+            extra_list: 额外信息列表
+            config: 配置参数
+            
+        Returns:
+            缓存key字符串，格式：reward:compute:{hash}
+            
+        Note:
+            使用统一的hash工具函数，确保与 TaskQueue 使用相同的hash算法。
+        """
+        return compute_reward_input_hash(
+            prompt=prompt,
+            response_list=response_list,
+            messages_list=messages_list,
+            extra_list=extra_list,
+            config=config,
+            length=None,  # 使用完整的64位hash
+            prefix="reward:compute",
+        )
     
     async def _get_from_cache(self, cache_key: str) -> Optional[dict]:
         """从缓存获取结果"""

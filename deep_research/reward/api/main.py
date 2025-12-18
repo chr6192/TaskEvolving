@@ -257,9 +257,9 @@ async def compute_rewards_async(request: AsyncComputeRequest):
         
         task_id = await task_queue.submit_task(
             prompt=request.data.prompt,
-            responses=request.data.response_list,
-            messages=request.data.messages_list,
-            extras=request.data.extra_list,
+            response_list=request.data.response_list,
+            messages_list=request.data.messages_list,
+            extra_list=request.data.extra_list,
             config=config,
             task_id=request.task_id,
         )

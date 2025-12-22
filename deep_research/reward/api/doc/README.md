@@ -14,6 +14,7 @@
 - [数据持久化](#数据持久化)
 - [性能优化](#性能优化)
 - [监控和日志](#监控和日志)
+- [性能问题诊断](#性能问题诊断)
 - [故障排查](#故障排查)
 - [开发指南](#开发指南)
 
@@ -1300,6 +1301,296 @@ async with httpx.AsyncClient(timeout=120.0) as client:
 LOG_LEVEL=INFO
 
 # 重启服务
+```
+
+---
+
+## 性能问题诊断
+
+### 异常长处理时间问题
+
+#### 问题症状
+
+部分样本处理时间出现异常：
+- **正常处理时间**: ~48秒
+- **异常处理时间**: ~5080秒 (约85分钟)
+- **平均处理时间**: ~633秒 (约10.5分钟)
+
+```json
+{
+  "max_compute_time": 5080.89,
+  "min_compute_time": 48.67,
+  "avg_compute_time": 633.37,
+  "cache_hit_rate": 0.0
+}
+```
+
+#### 根本原因分析
+
+**主要原因: LLM API调用hang住/限流** 🔴
+
+根据数据分析（min=48s, max=5080s, avg=633s），主要是LLM API问题：
+
+1. **API限流/排队**: 部分请求遇到限流，需要等待很长时间
+2. **API响应慢**: 某些LLM调用极慢或hang住
+3. **重试机制**: 超时后的重试进一步延长处理时间
+4. **并发冲击**: 多个请求同时发起，加剧API端压力
+
+**证据**：
+- 处理时间极不均匀（48s vs 5080s），如果是队列拥堵应该相对均匀
+- 没有缓存命中，所有请求都需要调用LLM
+- 每个group内部并行调用5个reward函数，实际LLM并发数高达50个
+
+#### 已实施的性能改进
+
+##### 1. ✅ 超时保护机制
+
+**问题**: 原代码在调用 `compute_score_async` 时没有超时控制
+
+**解决方案**:
+```python
+# 使用 asyncio.wait_for 添加超时保护（默认300秒）
+timeout_seconds = config.get("timeout", 300)
+result = await asyncio.wait_for(
+    self.compute_score_async(...),
+    timeout=timeout_seconds
+)
+```
+
+**效果**:
+- ✅ 防止LLM API hang住导致无限等待
+- ✅ 最多等待5分钟（可配置）
+- ✅ 超时后抛出 `TimeoutError` 异常
+- ✅ 记录详细的超时日志
+
+**日志示例**:
+```
+⏰ 计算超时: 样本数=1, 超时阈值=300s, 已耗时=301.45s
+📊 性能分析: 等待槽位=0.23s, 实际计算=301.45s, 总耗时=301.68s
+```
+
+##### 2. ✅ API限流检测和告警（基于HTTP 429状态码）
+
+**问题**: 无法识别API限流导致的延迟
+
+**解决方案**:
+```python
+# 通过HTTP 429状态码检测限流
+is_rate_limit = False
+if hasattr(e, 'status_code') and e.status_code == 429:
+    is_rate_limit = True
+elif hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code == 429:
+    is_rate_limit = True
+elif type(e).__name__ in ['RateLimitError', 'RateLimitException']:
+    is_rate_limit = True
+
+if is_rate_limit:
+    logger.warning("⚠️ API限流检测 (HTTP 429)")
+```
+
+**效果**:
+- ✅ 精确识别HTTP 429响应码
+- ✅ 支持常见SDK的限流异常类型
+- ✅ 输出专门的warning日志
+- ✅ 提供解决建议
+
+**日志示例**:
+```
+⚠️ API限流检测 (HTTP 429): RateLimitError
+  样本数: 1
+  已耗时: 125.67s
+  建议: 1) 降低并发数 2) 增加重试延迟 3) 使用API配额管理
+```
+
+##### 3. ✅ 随机抖动机制
+
+**问题**: 所有并发请求同时发起，产生"惊群效应"
+
+**解决方案**:
+```python
+# 在获取semaphore前添加50-300ms随机延迟
+jitter_delay = random.uniform(0.05, 0.3)
+await asyncio.sleep(jitter_delay)
+logger.debug(f"随机抖动延迟: {jitter_delay*1000:.1f}ms，减少并发冲击")
+```
+
+**效果**:
+- ✅ 将并发请求在时间轴上分散
+- ✅ 减少同时到达API端的请求数
+- ✅ 降低触发限流的概率
+- ✅ 避免"惊群效应"
+
+**原理示意**:
+```
+无抖动:  ||||||||||| (10个请求同时发起)
+有抖动:  |  | |   ||  |  | |  (分散在300ms内)
+```
+
+##### 4. ✅ 详细性能监控
+
+**新增监控点**:
+```python
+# 1. 记录队列等待时间
+task_wait_time = (datetime.now() - task_created_at).total_seconds()
+if task_wait_time > 10.0:
+    logger.warning(f"任务在队列中等待了 {task_wait_time:.2f}s")
+
+# 2. 记录并发槽位等待时间
+semaphore_wait_time = time.perf_counter() - semaphore_wait_start
+if semaphore_wait_time > 1.0:
+    logger.warning(f"⏱️ 等待并发槽位耗时: {semaphore_wait_time:.2f}s")
+
+# 3. 检测异常长的处理时间
+if processing_time > 100.0:
+    logger.warning(f"🐌 任务处理时间异常长! {processing_time:.2f}s")
+```
+
+**效果**:
+- ✅ 区分"队列等待"和"实际计算"时间
+- ✅ 自动检测异常长的处理时间
+- ✅ 提供问题诊断建议
+
+#### 性能问题快速诊断
+
+##### 症状1: 日志显示 "⏰ 计算超时"
+```
+⏰ 计算超时: 样本数=1, 超时阈值=300s, 已耗时=301.45s
+```
+
+**原因**: LLM API响应慢或hang住
+
+**解决方案**:
+1. 检查LLM API服务状态
+2. 降低并发数: `max_concurrent_groups=5`
+3. 如果持续超时，考虑增加timeout: `timeout=600`
+
+##### 症状2: 日志显示 "⚠️ API限流检测 (HTTP 429)"
+```
+⚠️ API限流检测 (HTTP 429): RateLimitError
+```
+
+**原因**: 触发了API限流
+
+**解决方案**:
+1. **立即**: 降低并发数 `max_concurrent_groups=5`
+2. **短期**: 联系API提供商增加配额
+3. **长期**: 使用多个API key轮询
+
+##### 症状3: 日志显示 "⏱️ 等待并发槽位耗时"
+```
+⏱️ 等待并发槽位耗时: 45.23s (可能存在队列拥堵)
+```
+
+**原因**: 队列拥堵，并发槽位不足
+
+**解决方案**:
+1. 增加并发数: `max_concurrent_groups=15`
+2. 增加处理器: `num_task_processors=6`
+3. 检查是否有任务hang住占用槽位
+
+##### 症状4: 日志显示 "🐌 任务处理时间异常长"
+```
+🐌 任务处理时间异常长!
+  处理耗时: 5080.89s
+  队列等待: 2.34s
+```
+
+**原因**: LLM API hang住
+
+**解决方案**:
+1. 降低timeout，更快检测失败: `timeout=180`
+2. 降低并发，减少API压力: `max_concurrent_groups=5`
+3. 检查特定reward函数是否有问题
+
+#### 配置调优建议
+
+##### 场景1: 频繁超时/限流（API压力大）
+```python
+# config.py 或环境变量
+MAX_CONCURRENT_GROUPS=5      # 降低并发
+TIMEOUT=180                  # 更快检测失败
+NUM_TASK_PROCESSORS=2        # 减少任务数
+```
+
+##### 场景2: 队列拥堵（处理能力不足）
+```python
+MAX_CONCURRENT_GROUPS=15     # 增加并发
+TIMEOUT=300                  # 保持默认
+NUM_TASK_PROCESSORS=6        # 增加处理器
+```
+
+##### 场景3: API稳定，追求高吞吐
+```python
+MAX_CONCURRENT_GROUPS=20     # 大幅增加并发
+TIMEOUT=300                  # 保持默认
+NUM_TASK_PROCESSORS=8        # 增加处理器
+ENABLE_CACHE=true            # 启用缓存
+```
+
+#### 监控指标解读
+
+通过 `/api/v1/metrics` 接口监控关键指标：
+
+| 指标 | 正常范围 | 异常值 | 说明 |
+|-----|---------|--------|------|
+| `max_compute_time` | < 100s | > 300s | 有任务hang住 |
+| `avg_compute_time` | 40-60s | > 100s | 整体性能下降 |
+| `failed_requests` | < 5% | > 20% | 大量失败 |
+| `cache_hit_rate` | > 30% | < 10% | 缓存未生效 |
+
+**查询命令**:
+```bash
+curl -s http://localhost:8000/api/v1/metrics | jq '.metrics.service | {
+  max_compute_time,
+  avg_compute_time,
+  failed_requests,
+  cache_hit_rate
+}'
+```
+
+#### 日志关键字速查
+
+| 日志关键字 | 含义 | 严重程度 |
+|-----------|------|---------|
+| `⏰ 计算超时` | LLM API超时 | 🔴 高 |
+| `⚠️ API限流检测 (HTTP 429)` | 触发限流 | 🟡 中 |
+| `⏱️ 等待并发槽位` | 队列拥堵 | 🟡 中 |
+| `🐌 任务处理时间异常长` | 任务hang住 | 🔴 高 |
+| `随机抖动延迟` | 正常运行 | 🟢 低 |
+| `✅ 任务完成` | 正常完成 | 🟢 低 |
+
+#### 性能测试脚本
+
+运行性能测试验证改进效果：
+
+```bash
+# 确保服务已启动
+python deep_research/reward/api/test_performance_improvements.py
+```
+
+测试脚本会：
+1. ✅ 检查API健康状态
+2. ✅ 获取初始指标
+3. ✅ 发送20个并发请求
+4. ✅ 统计超时、限流、成功率
+5. ✅ 对比前后指标变化
+
+**预期输出**:
+```
+📊 性能测试报告
+================================================================================
+总请求数: 20
+成功: 18
+失败: 2
+  - 超时: 1
+  - 限流: 1
+成功率: 90.0%
+
+⏱️ 响应时间:
+  平均: 52.34s
+  最小: 48.67s
+  最大: 301.45s
+================================================================================
 ```
 
 ---

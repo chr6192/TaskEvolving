@@ -4,6 +4,7 @@
 """
 import asyncio
 import logging
+import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
@@ -263,9 +264,27 @@ class RewardComputeService:
             logger.info(f"缓存命中返回: {sample_count} 个样本, 响应耗时 {response_time*1000:.2f}ms")
             return cached_result
         
+        # 随机抖动：在获取semaphore前添加小延迟，避免同时发起大量LLM请求
+        jitter_delay = random.uniform(0.05, 0.3)  # 50-300ms随机延迟
+        await asyncio.sleep(jitter_delay)
+        logger.debug(f"随机抖动延迟: {jitter_delay*1000:.1f}ms，减少并发冲击")
+        
+        # 记录等待并发槽位的开始时间
+        semaphore_wait_start = time.perf_counter()
+        
         # 并发控制
         async with self.semaphore:
+            # 记录等待时间
+            semaphore_wait_time = time.perf_counter() - semaphore_wait_start
+            if semaphore_wait_time > 1.0:  # 等待超过1秒才记录
+                logger.warning(f"⏱️ 等待并发槽位耗时: {semaphore_wait_time:.2f}s (可能存在队列拥堵)")
+            else:
+                logger.debug(f"获取并发槽位耗时: {semaphore_wait_time:.3f}s")
             start_time = time.perf_counter()
+            compute_start_time = time.perf_counter()  # 记录纯计算开始时间
+            
+            # 获取超时配置（默认5分钟）
+            timeout_seconds = config.get("timeout", 300)
             
             try:
                 # 调用 compute_score_async
@@ -274,15 +293,22 @@ class RewardComputeService:
                 config_params = config.copy()
                 return_details = config_params.pop("return_details", True)
                 return_statistics = config_params.pop("return_statistics", True)
+                config_params.pop("timeout", None)  # 移除timeout，避免传递给compute_score_async
                 
-                result = await self.compute_score_async(
-                    prompt=prompt,
-                    group_responses=response_list,
-                    group_messages=messages_list,
-                    group_extras=extra_list,
-                    return_details=return_details,
-                    return_statistics=return_statistics,
-                    **config_params,  # 传递其余config参数
+                logger.info(f"🚀 开始计算reward (样本数={sample_count}, 超时={timeout_seconds}s)")
+                
+                # 使用 asyncio.wait_for 添加超时保护
+                result = await asyncio.wait_for(
+                    self.compute_score_async(
+                        prompt=prompt,
+                        group_responses=response_list,
+                        group_messages=messages_list,
+                        group_extras=extra_list,
+                        return_details=return_details,
+                        return_statistics=return_statistics,
+                        **config_params,  # 传递其余config参数
+                    ),
+                    timeout=timeout_seconds
                 )
                 
                 # 解析结果
@@ -341,18 +367,70 @@ class RewardComputeService:
                 )
                 
                 logger.info(
-                    f"计算完成: {sample_count} 个样本, "
+                    f"✅ 计算完成: {sample_count} 个样本, "
                     f"计算耗时 {compute_time:.2f}s, 总响应耗时 {total_response_time:.2f}s"
                 )
                 
                 return result_dict
                 
+            except asyncio.TimeoutError:
+                # 超时异常单独处理
+                compute_time = time.perf_counter() - compute_start_time
+                
+                async with self.metrics_lock:
+                    self.metrics["failed_requests"] += 1
+                
+                logger.error(
+                    f"⏰ 计算超时: 样本数={sample_count}, "
+                    f"超时阈值={timeout_seconds}s, 已耗时={compute_time:.2f}s"
+                )
+                logger.error(
+                    f"📊 性能分析: "
+                    f"等待槽位={semaphore_wait_time:.2f}s, "
+                    f"实际计算={compute_time:.2f}s, "
+                    f"总耗时={(time.perf_counter() - request_start_time):.2f}s"
+                )
+                
+                raise TimeoutError(
+                    f"Reward计算超时（超过{timeout_seconds}秒），样本数={sample_count}，"
+                    f"可能原因：1) LLM API响应慢 2) 网络延迟 3) API限流排队"
+                )
+                
             except Exception as e:
+                # 其他异常处理
+                compute_time = time.perf_counter() - compute_start_time
+                
                 # 统计失败请求
                 async with self.metrics_lock:
                     self.metrics["failed_requests"] += 1
                 
-                logger.error(f"计算奖励时发生错误: {e}", exc_info=True)
+                # 检测是否为API限流错误（通过HTTP 429状态码）
+                is_rate_limit = False
+                if hasattr(e, 'status_code') and e.status_code == 429:
+                    # HTTP 429 Too Many Requests
+                    is_rate_limit = True
+                elif hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code == 429:
+                    # httpx.HTTPStatusError or requests.HTTPError
+                    is_rate_limit = True
+                elif type(e).__name__ in ['RateLimitError', 'RateLimitException']:
+                    # SDK特定的限流异常
+                    is_rate_limit = True
+                
+                if is_rate_limit:
+                    logger.warning(
+                        f"⚠️ API限流检测 (HTTP 429): {e}\n"
+                        f"  样本数: {sample_count}\n"
+                        f"  已耗时: {compute_time:.2f}s\n"
+                        f"  建议: 1) 降低并发数 2) 增加重试延迟 3) 使用API配额管理"
+                    )
+                else:
+                    logger.error(
+                        f"❌ 计算奖励时发生错误: {e}\n"
+                        f"  样本数: {sample_count}\n"
+                        f"  已耗时: {compute_time:.2f}s",
+                        exc_info=True
+                    )
+                
                 raise
     
     async def compute_batch_groups(

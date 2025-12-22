@@ -356,7 +356,22 @@ class TaskQueue:
                     logger.warning(f"{processor_name}: 任务不存在 {task_id}")
                     continue
                 
-                logger.info(f"{processor_name}: 开始处理任务 {task_id}")
+                # 记录任务从创建到开始处理的延迟
+                import time
+                from datetime import datetime
+                task_created_at = datetime.fromisoformat(task.created_at)
+                task_wait_time = (datetime.now() - task_created_at).total_seconds()
+                
+                if task_wait_time > 10.0:  # 等待超过10秒记录警告
+                    logger.warning(
+                        f"{processor_name}: 任务 {task_id} 在队列中等待了 {task_wait_time:.2f}s "
+                        f"(队列可能拥堵)"
+                    )
+                else:
+                    logger.info(
+                        f"{processor_name}: 开始处理任务 {task_id} "
+                        f"(队列等待: {task_wait_time:.2f}s)"
+                    )
                 
                 # 更新状态为处理中
                 await self.update_task_status(
@@ -366,7 +381,6 @@ class TaskQueue:
                 )
                 
                 # 执行计算
-                import time
                 start_time = time.perf_counter()
                 
                 try:
@@ -389,10 +403,22 @@ class TaskQueue:
                         processing_time=processing_time,
                     )
                     
-                    logger.info(
-                        f"{processor_name}: 任务完成 {task_id}, "
-                        f"耗时 {processing_time:.2f}s"
-                    )
+                    # 检测异常长的处理时间
+                    if processing_time > 100.0:  # 超过100秒
+                        logger.warning(
+                            f"🐌 {processor_name}: 任务 {task_id} 处理时间异常长!\n"
+                            f"  处理耗时: {processing_time:.2f}s\n"
+                            f"  队列等待: {task_wait_time:.2f}s\n"
+                            f"  总耗时: {(task_wait_time + processing_time):.2f}s\n"
+                            f"  样本数: {len(task.response_list)}\n"
+                            f"  可能原因: 1) LLM API hang 2) 网络延迟 3) API限流"
+                        )
+                    else:
+                        logger.info(
+                            f"✅ {processor_name}: 任务完成 {task_id}, "
+                            f"处理耗时 {processing_time:.2f}s, "
+                            f"总耗时 {(task_wait_time + processing_time):.2f}s"
+                        )
                     
                 except Exception as e:
                     processing_time = time.perf_counter() - start_time
@@ -407,11 +433,45 @@ class TaskQueue:
                         processing_time=processing_time,
                     )
                     
-                    logger.error(
-                        f"{processor_name}: 任务失败 {task_id}, "
-                        f"错误: {error_msg}",
-                        exc_info=True
-                    )
+                    # 检测错误类型
+                    is_timeout = 'timeout' in error_msg.lower() or isinstance(e, TimeoutError)
+                    
+                    # 检测API限流错误（通过HTTP 429状态码）
+                    is_rate_limit = False
+                    if hasattr(e, 'status_code') and e.status_code == 429:
+                        is_rate_limit = True
+                    elif hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code == 429:
+                        is_rate_limit = True
+                    elif type(e).__name__ in ['RateLimitError', 'RateLimitException']:
+                        is_rate_limit = True
+                    
+                    if is_timeout:
+                        logger.error(
+                            f"⏰ {processor_name}: 任务超时 {task_id}\n"
+                            f"  处理耗时: {processing_time:.2f}s\n"
+                            f"  队列等待: {task_wait_time:.2f}s\n"
+                            f"  样本数: {len(task.response_list)}\n"
+                            f"  错误: {error_msg}\n"
+                            f"  🔍 分析: 可能是LLM API响应慢或hang住"
+                        )
+                    elif is_rate_limit:
+                        logger.warning(
+                            f"⚠️ {processor_name}: 任务遇到API限流 (HTTP 429) {task_id}\n"
+                            f"  处理耗时: {processing_time:.2f}s\n"
+                            f"  队列等待: {task_wait_time:.2f}s\n"
+                            f"  样本数: {len(task.response_list)}\n"
+                            f"  错误: {error_msg}\n"
+                            f"  💡 建议: 降低max_concurrent_groups或增加API配额"
+                        )
+                    else:
+                        logger.error(
+                            f"❌ {processor_name}: 任务失败 {task_id}\n"
+                            f"  处理耗时: {processing_time:.2f}s\n"
+                            f"  队列等待: {task_wait_time:.2f}s\n"
+                            f"  样本数: {len(task.response_list)}\n"
+                            f"  错误: {error_msg}",
+                            exc_info=True
+                        )
                 
             except asyncio.CancelledError:
                 logger.info(f"{processor_name} 被取消")

@@ -8,24 +8,24 @@ OpenJudge GradingRunner with financial domain and agent graders.
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
-from open_judge.graders.agent.action.action_loop import ActionLoopDetectionGrader
-from open_judge.graders.agent.observation.observation_information_gain import (
+from openjudge.graders.agent.action.action_loop import ActionLoopDetectionGrader
+from openjudge.graders.agent.observation.observation_information_gain import (
     ObservationInformationGainGrader,
 )
-from open_judge.graders.agent.trajectory.trajectory_comprehensive import (
+from openjudge.graders.agent.trajectory.trajectory_comprehensive import (
     TrajectoryComprehensiveGrader,
 )
-from open_judge.graders.schema import GraderError
-from open_judge.models.openai_chat_model import OpenAIChatModel
-from open_judge.models.schema.prompt_template import LanguageEnum
-from open_judge.runner.grading_runner import GraderConfig, GradingRunner
-from open_judge.scenarios.deep_research.graders.financial_report_resolution import (
+from openjudge.graders.schema import GraderError
+from openjudge.models.openai_chat_model import OpenAIChatModel
+from openjudge.models.schema.prompt_template import LanguageEnum
+from openjudge.runner.grading_runner import GraderConfig, GradingRunner
+from openjudge.scenarios.deep_research.graders.financial_report_resolution import (
     FinancialReportResolutionGrader,
 )
-from open_judge.scenarios.deep_research.graders.financial_trajectory_faithfulness import (
+from openjudge.scenarios.deep_research.graders.financial_trajectory_faithfulness import (
     FinancialTrajectoryFaithfulGrader,
 )
-from open_judge.scenarios.deep_research.graders.rubrics_based_trajectory_performance import (
+from openjudge.scenarios.deep_research.graders.rubrics_based_trajectory_performance import (
     RubricsBasedTrajectoryPerformance,
 )
 

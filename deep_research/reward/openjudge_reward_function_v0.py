@@ -137,13 +137,13 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
                 mapper=lambda data: {"messages": data["messages"]},
             ),
             # Rubrics-based evaluation
-            "rubrics_based_trajectory_performance": GraderConfig(
-                grader=RubricsBasedTrajectoryPerformance(model=model, language=language),
-                mapper=lambda data: {
-                    "messages": data["messages"], 
-                    "rubrics": data.get("rubrics", [])
-                },
-            ),
+            # "rubrics_based_trajectory_performance": GraderConfig(
+            #     grader=RubricsBasedTrajectoryPerformance(model=model, language=language),
+            #     mapper=lambda data: {
+            #         "messages": data["messages"], 
+            #         "rubrics": data.get("rubrics", [])
+            #     },
+            # ),
             # Comprehensive trajectory evaluation
             "trajectory_comprehensive": GraderConfig(
                 grader=TrajectoryComprehensiveGrader(model=model, language=language),

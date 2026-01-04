@@ -20,7 +20,7 @@ TRAIN_DATA="${PATH_TO_DR}/data/4k_w_skeleton/train_250731.parquet"
 EVAL_DATA="${PATH_TO_DR}/data/4k_w_skeleton/test_250731.parquet"
 
 CONFIG_PATH="$PATH_TO_PROJ/deep_research/config"
-TOOL_CONFIG_PATH="${PATH_TO_DR}/config/tool_config/dr_tool_config.yaml"
+TOOL_CONFIG_PATH="${PATH_TO_DR}/config/tool_config/dr_tool_config_as.yaml"
 
 REWARD_FUN="${PATH_TO_DR}/reward/openjudge_reward_function_v0.py"
 

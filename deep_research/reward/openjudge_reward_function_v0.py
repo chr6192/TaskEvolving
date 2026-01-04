@@ -29,7 +29,7 @@ from openjudge.scenarios.deep_research.graders.rubrics_based_trajectory_performa
     RubricsBasedTrajectoryPerformance,
 )
 
-from .openjudge_reward_manager import (
+from deep_research.reward.openjudge_reward_manager import (
     BaseOpenJudgeRewardFunction,
     RewardResult,
     RewardSample,

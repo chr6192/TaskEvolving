@@ -12,13 +12,7 @@ trainer:
 
 reward_model:
   reward_kwargs:
-    reward_manager_class_path: "deep_research.reward.antfin_reward_manager.AntfinRewardManager"
-    # 异步模式配置：true=异步模式，false=同步模式，需要与训练脚本中的custom_reward_function.name=compute_score_async对应
-    async_mode: true
-    # 异步模式的超时时间（秒）
-    timeout: 1200.0
-    # 同步模式的最大工作线程数
-    max_workers: 8
+    reward_manager_class_path: "deep_research.reward.openjudge_reward_manager.OpenJudgeRewardManager"
 
 #actor_rollout_ref:
 #  rollout:

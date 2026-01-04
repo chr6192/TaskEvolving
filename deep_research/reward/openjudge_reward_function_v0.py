@@ -465,3 +465,18 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
                 "metadata": getattr(result, "metadata", None),
             }
 
+
+# =============================================================================
+# Default Instance for VERL Integration
+# =============================================================================
+
+# Create default instance with standard parameters for training
+compute_score_async = OpenJudgeRewardFunctionV0(
+    model_name="qwen3-max",
+    temperature=0.0,
+    language=LanguageEnum.ZH,
+    max_concurrency=32,
+    grader_weights=None,  # Use equal weights by default
+    show_progress=True,
+)
+

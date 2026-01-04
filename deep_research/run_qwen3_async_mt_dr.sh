@@ -4,13 +4,13 @@ export VLLM_USE_V1=1
 
 ulimit -n 65535
 
-GPUS=2
+GPUS=8
 ray start --head --node-ip-address 127.0.0.1 --num-gpus $GPUS
 
 TASK_NAME="deep_research"
-MODEL_NAME="Qwen3-0.6B"
+MODEL_NAME="Qwen3-8B"
 CURRENT_DATE=$(date +"%Y%m%d-%H%M%S")
-ROLLOUT_N=2
+ROLLOUT_N=4
 
 PATH_TO_PROJ=$(pwd)
 PATH_TO_VERL="${PATH_TO_PROJ}/verl"
@@ -22,9 +22,7 @@ EVAL_DATA="${PATH_TO_DR}/data/test_250624.parquet"
 CONFIG_PATH="$PATH_TO_PROJ/deep_research/config"
 TOOL_CONFIG_PATH="${PATH_TO_DR}/config/tool_config/dr_tool_config.yaml"
 
-# RL_DATASET="${PATH_TO_DR}/dataset/custom_rl_dataset.py"
-# REWARD_FUN="${PATH_TO_DR}/reward/dr_reward_function.py"
-REWARD_FUN="${PATH_TO_DR}/reward/mock_reward_function.py"
+REWARD_FUN="${PATH_TO_DR}/reward/openjudge_reward_function_v0.py"
 
 COMPLETION_CALLBACK="deep_research.dr_completion_callback.DrCompletionCallback"
 # CHAT_SCHEDULER="${PATH_TO_DR}/dr_chat_scheduler.py"
@@ -60,10 +58,11 @@ ray job submit --address="http://127.0.0.1:8265" \
     data.train_batch_size=16 \
     data.val_batch_size=16 \
     data.max_prompt_length=8192 \
-    data.max_response_length=2048 \
+    data.max_response_length=8192 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     custom_reward_function.path="$REWARD_FUN" \
+    custom_reward_function.name=compute_score_async \
     actor_rollout_ref.model.path="$PRETRAIN_MODEL" \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -92,7 +91,7 @@ ray job submit --address="http://127.0.0.1:8265" \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console','swanlab'] \
     trainer.project_name="$TASK_NAME" \
     trainer.experiment_name="$MODEL_NAME-$CURRENT_DATE-n$ROLLOUT_N" \
     trainer.val_before_train=True \

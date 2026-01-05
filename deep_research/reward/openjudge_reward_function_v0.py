@@ -172,13 +172,13 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
         1. Converts samples to OpenJudge format
         2. Calls GradingRunner.arun_multiple_datasets
         3. Parses and aggregates results
-        4. Returns sorted results
+        4. Returns results (order-independent)
         
         Args:
             prompt_to_samples: Dict mapping prompts to samples
             
         Returns:
-            List of RewardResult sorted by original_index
+            List of RewardResult (order-independent)
         """
         # Convert to OpenJudge format
         datasets = []
@@ -263,7 +263,6 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
         2. Iterates over each dataset and sample
         3. Aggregates scores from all graders
         4. Creates RewardResult objects
-        5. Sorts by original_index to restore input order
         
         Args:
             runner_results: Results from arun_multiple_datasets
@@ -280,7 +279,7 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
             prompt_to_samples: Dict mapping prompts to samples
             
         Returns:
-            List of RewardResult sorted by original_index
+            List of RewardResult (order-independent)
         """
         all_results = []
         prompt_list = list(prompt_to_samples.keys())
@@ -361,9 +360,6 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
                     details=details
                 )
                 all_results.append(result_item)
-        
-        # Sort by original_index to restore input order
-        all_results.sort(key=lambda x: x.original_index)
         
         return all_results
     

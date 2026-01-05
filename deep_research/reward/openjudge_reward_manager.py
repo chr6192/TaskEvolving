@@ -290,19 +290,22 @@ class OpenJudgeRewardManager:
         3. Fills missing reward_info fields across all samples
         
         Args:
-            result_items: List of RewardResult (should be sorted)
+            result_items: List of RewardResult (order-independent)
             data_length: Expected data length
         
         Returns:
             (all_rewards, all_reward_infos, all_details)
         """
+        # Build index mapping for order-independent access
+        result_map = {item.original_index: item for item in result_items}
+        
         # Collect all possible reward_info keys
         all_info_keys = set()
         for item in result_items:
             all_info_keys.update(item.reward_info.keys())
         
         # Validate integrity
-        self._verify_results_integrity(result_items, data_length, all_info_keys)
+        self._verify_results_integrity(result_map, data_length, all_info_keys)
 
         # Fill missing keys with default value
         for item in result_items:
@@ -310,18 +313,18 @@ class OpenJudgeRewardManager:
                 if key not in item.reward_info:
                     item.reward_info[key] = 0.0
 
-        # Extract information
-        all_rewards = [item.score for item in result_items]
+        # Extract information in original_index order
+        all_rewards = [result_map[i].score for i in range(data_length)]
         all_reward_infos = defaultdict(list)
         for key in all_info_keys:
-            all_reward_infos[key] = [item.reward_info[key] for item in result_items]
-        all_details = [item.details for item in result_items]
+            all_reward_infos[key] = [result_map[i].reward_info[key] for i in range(data_length)]
+        all_details = [result_map[i].details for i in range(data_length)]
 
         return all_rewards, dict(all_reward_infos), all_details
 
     def _verify_results_integrity(
         self, 
-        result_items: List[RewardResult], 
+        result_map: Dict[int, RewardResult], 
         expected_length: int,
         all_info_keys: set
     ):
@@ -330,11 +333,11 @@ class OpenJudgeRewardManager:
         
         Checks:
         1. Result count matches expected length
-        2. Indices are continuous (0 to expected_length-1)
-        3. All reward_info fields have consistent length
+        2. Indices are complete (0 to expected_length-1)
+        3. No missing or duplicated indices
         
         Args:
-            result_items: List of results (should be sorted)
+            result_map: Dict mapping original_index to RewardResult
             expected_length: Expected data length
             all_info_keys: Set of all reward_info keys
         
@@ -342,26 +345,27 @@ class OpenJudgeRewardManager:
             AssertionError: If validation fails
         """
         # Validate count
-        actual_length = len(result_items)
+        actual_length = len(result_map)
         if actual_length != expected_length:
             raise AssertionError(
                 f"Result count mismatch: expected {expected_length}, got {actual_length}\n"
-                f"First 5 result indices: {[item.original_index for item in result_items[:5]]}"
+                f"Received indices: {sorted(result_map.keys())[:10]}{'...' if len(result_map) > 10 else ''}"
             )
         
-        # Check index continuity
-        expected_indices = list(range(expected_length))
-        actual_indices = [item.original_index for item in result_items]
+        # Check index completeness
+        expected_indices = set(range(expected_length))
+        actual_indices = set(result_map.keys())
         
-        if actual_indices != expected_indices:
-            missing = set(expected_indices) - set(actual_indices)
-            duplicated = [idx for idx in actual_indices if actual_indices.count(idx) > 1]
+        missing = expected_indices - actual_indices
+        extra = actual_indices - expected_indices
+        
+        if missing or extra:
             raise AssertionError(
-                f"Index discontinuity or not sorted:\n"
-                f"  Expected: {expected_indices[:10]}{'...' if expected_length > 10 else ''}\n"
-                f"  Actual: {actual_indices[:10]}{'...' if len(actual_indices) > 10 else ''}\n"
+                f"Index integrity violation:\n"
+                f"  Expected indices: 0 to {expected_length - 1}\n"
+                f"  Actual indices: {sorted(actual_indices)[:10]}{'...' if len(actual_indices) > 10 else ''}\n"
                 f"  Missing: {sorted(missing) if missing else 'None'}\n"
-                f"  Duplicated: {set(duplicated) if duplicated else 'None'}"
+                f"  Extra/Invalid: {sorted(extra) if extra else 'None'}"
             )
         
         logger.info(

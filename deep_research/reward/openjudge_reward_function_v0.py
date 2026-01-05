@@ -85,18 +85,16 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
             temperature=temperature,
         )
         
-        # Create grader configs
-        grader_configs = self.create_grader_configs(self.model, language)
+        # Create grader configs (graders can be reused)
+        self.grader_configs = self.create_grader_configs(self.model, language)
         
-        # Initialize GradingRunner
-        self.runner = GradingRunner(
-            grader_configs=grader_configs,
-            max_concurrency=max_concurrency,
-            show_progress=kwargs.get("show_progress", True),
-        )
+        # Store parameters for creating GradingRunner on each call
+        # (avoid Semaphore bound to different event loop issue)
+        self.max_concurrency = max_concurrency
+        self.show_progress = kwargs.get("show_progress", True)
         
         self.grader_weights = grader_weights
-        self.grader_names = list(grader_configs.keys())
+        self.grader_names = list(self.grader_configs.keys())
         
         logger.info(
             f"Initialized OpenJudgeRewardFunctionV0 with "
@@ -191,9 +189,17 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
             f"{len(datasets)} groups"
         )
         
+        # Create GradingRunner for each call to avoid Semaphore
+        # being bound to a different event loop
+        runner = GradingRunner(
+            grader_configs=self.grader_configs,
+            max_concurrency=self.max_concurrency,
+            show_progress=self.show_progress,
+        )
+        
         # Call GradingRunner
         try:
-            runner_results = await self.runner.arun_multiple_datasets(datasets)
+            runner_results = await runner.arun_multiple_datasets(datasets)
         except Exception as e:
             logger.error(f"GradingRunner.arun_multiple_datasets failed: {e}")
             logger.exception("Detailed error:")

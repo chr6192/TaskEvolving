@@ -130,3 +130,7 @@ outputs
 .nv
 .keras
 .config
+deprecated/
+data/
+deep_research/synthesis/docs/
+deep_research/synthesis/bak/

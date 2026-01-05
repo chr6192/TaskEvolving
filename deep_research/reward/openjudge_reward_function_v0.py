@@ -398,8 +398,6 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
             if result is None or isinstance(result, GraderError):
                 # Error case: this grader contributes 0.0
                 reward_info[f"{grader_name}_score"] = 0.0
-                if result and isinstance(result, GraderError):
-                    reward_info[f"{grader_name}_error"] = result.error
             else:
                 score = result.score if hasattr(result, "score") else 0.0
                 reward_info[f"{grader_name}_score"] = score

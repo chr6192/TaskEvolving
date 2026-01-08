@@ -8,11 +8,11 @@ defaults:
 
 # 自定义trainer配置
 trainer:
-  custom_class_path: "deep_research.dr_ray_trainer.DrRayPPOTrainer"
+  custom_class_path: "deep_research.dr_ray_trainer_v1.DrRayPPOTrainer"
 
 reward_model:
   reward_kwargs:
-    reward_manager_class_path: "deep_research.reward.openjudge_reward_manager.OpenJudgeRewardManager"
+    reward_manager_class_path: "deep_research.reward.openjudge_reward_manager_v1.OpenJudgeRewardManager"
 
 #actor_rollout_ref:
 #  rollout:

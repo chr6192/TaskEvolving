@@ -125,7 +125,7 @@ log
 outputs
 .history
 
-
+*.jsonl
 .triton
 .nv
 .keras

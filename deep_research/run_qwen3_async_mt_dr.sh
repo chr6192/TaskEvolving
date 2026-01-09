@@ -102,4 +102,7 @@ ray job submit --address="http://127.0.0.1:8265" \
     trainer.total_epochs=2 \
     trainer.default_local_dir="$CKPT_DIR" \
     trainer.rollout_data_dir="$ROLLOUT_DATA_DIR" \
-    trainer.validation_data_dir="$VALIDATION_DATA_DIR" $@
+    trainer.validation_data_dir="$VALIDATION_DATA_DIR" \
+    +trainer.custom_class_path=deep_research.dr_ray_trainer_v1.DrRayPPOTrainer \
+    +reward_model.reward_kwargs.reward_manager_class_path=deep_research.reward.openjudge_reward_manager_v1.OpenJudgeRewardManager
+    $@

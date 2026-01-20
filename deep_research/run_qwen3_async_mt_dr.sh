@@ -16,13 +16,13 @@ PATH_TO_PROJ=$(pwd)
 PATH_TO_VERL="${PATH_TO_PROJ}/verl"
 PATH_TO_DR="${PATH_TO_PROJ}/deep_research"
 
-TRAIN_DATA="${PATH_TO_DR}/data/xuangu/xuangu_251105.parquet"
-EVAL_DATA="${PATH_TO_DR}/data/xuangu/xuangu_251105.parquet"
+TRAIN_DATA="${PATH_TO_DR}/data/financial_dr/query_evolutions_training.parquet"
+EVAL_DATA="${PATH_TO_DR}/data/financial_dr/query_evolutions_training.parquet"
 
 CONFIG_PATH="$PATH_TO_PROJ/deep_research/config"
 TOOL_CONFIG_PATH="${PATH_TO_DR}/config/tool_config/dr_tool_config_as.yaml"
 
-REWARD_FUN="${PATH_TO_DR}/reward/openjudge_reward_function_v0.py"
+REWARD_FUN="${PATH_TO_DR}/reward/openjudge_reward_function.py"
 
 COMPLETION_CALLBACK="deep_research.dr_completion_callback.DrCompletionCallback"
 # CHAT_SCHEDULER="${PATH_TO_DR}/dr_chat_scheduler.py"
@@ -101,6 +101,6 @@ ray job submit --address="http://127.0.0.1:8265" \
     trainer.default_local_dir="$CKPT_DIR" \
     trainer.rollout_data_dir="$ROLLOUT_DATA_DIR" \
     trainer.validation_data_dir="$VALIDATION_DATA_DIR" \
-    +trainer.custom_class_path=deep_research.dr_ray_trainer_v1.DrRayPPOTrainer \
-    +reward_model.reward_kwargs.reward_manager_class_path=deep_research.reward.openjudge_reward_manager_v1.OpenJudgeRewardManager
+    +trainer.custom_class_path=deep_research.dr_ray_trainer.DrRayPPOTrainer \
+    +reward_model.reward_kwargs.reward_manager_class_path=deep_research.reward.openjudge_reward_manager.OpenJudgeRewardManager
     $@

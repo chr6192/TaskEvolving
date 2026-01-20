@@ -66,6 +66,7 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
         language: LanguageEnum = LanguageEnum.ZH,
         max_concurrency: int = 32,
         grader_weights: Optional[Dict[str, float]] = None,
+        api_timeout: float = 300.0,
         **kwargs
     ):
         """
@@ -78,11 +79,16 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
             max_concurrency: Max concurrent OpenAI requests
             grader_weights: Weights for aggregating grader scores.
                 If None, uses equal weights. Will be normalized automatically.
+            api_timeout: API call timeout in seconds (default: 300s = 5 minutes).
+                This is critical for long prompts and large context windows.
             **kwargs: Additional arguments (e.g., show_progress)
         """
         self.model = OpenAIChatModel(
             model=model_name,
             temperature=temperature,
+            client_args={
+                "timeout": api_timeout,
+            }
         )
         
         # Create grader configs (graders can be reused)
@@ -101,6 +107,7 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
             f"{len(self.grader_names)} graders: {self.grader_names}"
         )
         logger.info(f"Max concurrency: {max_concurrency}")
+        logger.info(f"API timeout: {api_timeout}s")
     
     def create_grader_configs(
         self,
@@ -477,6 +484,7 @@ compute_score_async = OpenJudgeRewardFunctionV0(
     language=LanguageEnum.ZH,
     max_concurrency=32,
     grader_weights=None,  # Use equal weights by default
+    api_timeout=300.0,  # 5 minutes timeout for long context evaluation
     show_progress=True,
 )
 

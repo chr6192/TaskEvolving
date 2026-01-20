@@ -49,8 +49,6 @@ ray job submit --address="http://127.0.0.1:8265" \
     --runtime-env="$CONFIG_PATH/runtime_env.yaml" \
     -- \
     python3 -m verl.trainer.main_ppo \
-    --config-path="$CONFIG_PATH" \
-    --config-name='dr_ppo_trainer' \
     algorithm.adv_estimator=grpo \
     data.train_files="$TRAIN_DATA" \
     data.val_files="$EVAL_DATA" \

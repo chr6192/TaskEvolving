@@ -89,7 +89,7 @@ class BaseOpenJudgeRewardFunction:
 
 class OpenJudgeRewardManager:
     """
-    Reward manager that integrates with VERL training framework (V1 - Community Compatible).
+    Reward manager that integrates with VERL training framework.
     
     This manager handles DataProto batches from VERL and delegates scoring
     to a pluggable reward function (compute_score).
@@ -101,12 +101,8 @@ class OpenJudgeRewardManager:
     - Reconstructing results to match input order
     - Filling reward tensor
     
-    V1 Changes:
-    - Returns details as part of reward_extra_info["details"] instead of top-level field
-    - Fully compatible with community version's _compute_or_extract_reward() interface
-    
     Example:
-        reward_fn = OpenJudgeRewardFunctionV0(model_name="qwen3-max")
+        reward_fn = OpenJudgeRewardFunction(model_name="qwen3-max")
         manager = OpenJudgeRewardManager(
             tokenizer=tokenizer,
             num_examine=5,

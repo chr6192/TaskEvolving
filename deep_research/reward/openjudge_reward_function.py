@@ -36,9 +36,9 @@ from deep_research.reward.openjudge_reward_manager import (
 )
 
 
-class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
+class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
     """
-    V0 implementation using OpenJudge GradingRunner.
+    Implementation using OpenJudge GradingRunner.
     
     This version includes:
     - Financial domain graders (report resolution, trajectory faithfulness)
@@ -49,7 +49,7 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
     customize the grader combination.
     
     Example:
-        reward_fn = OpenJudgeRewardFunctionV0(
+        reward_fn = OpenJudgeRewardFunction(
             model_name="qwen3-max",
             temperature=0.0,
             grader_weights={
@@ -70,7 +70,7 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
         **kwargs
     ):
         """
-        Initialize V0 reward function.
+        Initialize reward function.
         
         Args:
             model_name: OpenAI model name
@@ -103,7 +103,7 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
         self.grader_names = list(self.grader_configs.keys())
         
         logger.info(
-            f"Initialized OpenJudgeRewardFunctionV0 with "
+            f"Initialized OpenJudgeRewardFunction with "
             f"{len(self.grader_names)} graders: {self.grader_names}"
         )
         logger.info(f"Max concurrency: {max_concurrency}")
@@ -142,13 +142,13 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
                 mapper=lambda data: {"messages": data["messages"]},
             ),
             # Rubrics-based evaluation
-            # "rubrics_based_trajectory_performance": GraderConfig(
-            #     grader=RubricsBasedTrajectoryPerformance(model=model, language=language),
-            #     mapper=lambda data: {
-            #         "messages": data["messages"], 
-            #         "rubrics": data.get("rubrics", [])
-            #     },
-            # ),
+            "rubrics_based_trajectory_performance": GraderConfig(
+                grader=RubricsBasedTrajectoryPerformance(model=model, language=language),
+                mapper=lambda data: {
+                    "messages": data["messages"], 
+                    "rubrics": data.get("rubrics", [])
+                },
+            ),
             # Comprehensive trajectory evaluation
             "trajectory_comprehensive": GraderConfig(
                 grader=TrajectoryComprehensiveGrader(model=model, language=language),
@@ -478,7 +478,7 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
 # =============================================================================
 
 # Create default instance with standard parameters for training
-compute_score_async = OpenJudgeRewardFunctionV0(
+compute_score_async = OpenJudgeRewardFunction(
     model_name="qwen-flash",
     temperature=0.0,
     language=LanguageEnum.ZH,

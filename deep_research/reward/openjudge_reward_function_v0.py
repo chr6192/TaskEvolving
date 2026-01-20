@@ -66,7 +66,7 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
         language: LanguageEnum = LanguageEnum.ZH,
         max_concurrency: int = 32,
         grader_weights: Optional[Dict[str, float]] = None,
-        api_timeout: float = 300.0,
+        api_timeout: float = 120.0,
         **kwargs
     ):
         """
@@ -79,7 +79,7 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
             max_concurrency: Max concurrent OpenAI requests
             grader_weights: Weights for aggregating grader scores.
                 If None, uses equal weights. Will be normalized automatically.
-            api_timeout: API call timeout in seconds (default: 300s = 5 minutes).
+            api_timeout: API call timeout in seconds (default: 120s = 2 minutes).
                 This is critical for long prompts and large context windows.
             **kwargs: Additional arguments (e.g., show_progress)
         """
@@ -479,12 +479,12 @@ class OpenJudgeRewardFunctionV0(BaseOpenJudgeRewardFunction):
 
 # Create default instance with standard parameters for training
 compute_score_async = OpenJudgeRewardFunctionV0(
-    model_name="qwen3-max",
+    model_name="qwen-flash",
     temperature=0.0,
     language=LanguageEnum.ZH,
     max_concurrency=32,
     grader_weights=None,  # Use equal weights by default
-    api_timeout=300.0,  # 5 minutes timeout for long context evaluation
+    api_timeout=120.0,  # 2 minutes timeout for long context evaluation
     show_progress=True,
 )
 

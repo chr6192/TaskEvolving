@@ -25,7 +25,7 @@ TOOL_CONFIG_PATH="${PATH_TO_DR}/config/tool_config/dr_tool_config_as.yaml"
 REWARD_FUN="${PATH_TO_DR}/reward/openjudge_reward_function.py"
 
 COMPLETION_CALLBACK="deep_research.dr_completion_callback.DrCompletionCallback"
-# CHAT_SCHEDULER="${PATH_TO_DR}/dr_chat_scheduler.py"
+CHAT_SCHEDULER="deep_research.dr_chat_scheduler_no_thinking.DrChatSchedulerNoThinking"
 
 USER_DIR="$(dirname ${PATH_TO_PROJ})"
 PRETRAIN_MODEL="${MODEL_ROOT:-/path/to/models}/${MODEL_NAME}"
@@ -82,7 +82,9 @@ ray job submit --address="http://127.0.0.1:8265" \
     actor_rollout_ref.rollout.multi_turn.max_turns=10 \
     actor_rollout_ref.rollout.multi_turn.format=hermes \
     actor_rollout_ref.rollout.multi_turn.completion_callback="$COMPLETION_CALLBACK" \
+    actor_rollout_ref.rollout.multi_turn.chat_scheduler_class_name="$CHAT_SCHEDULER" \
     actor_rollout_ref.rollout.multi_turn.tool_config_path="$TOOL_CONFIG_PATH" \
+    actor_rollout_ref.rollout.enable_thinking=False \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \

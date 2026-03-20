@@ -10,6 +10,7 @@ from typing import List
 from datetime import datetime
 
 from ..core.data_structures import PipelineResult
+from .path_utils import resolve_under_repo
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,8 @@ class StreamingWriter:
         Args:
             output_dir: 输出目录路径
         """
-        self.output_dir = Path(output_dir)
+        # 统一把相对路径解析到 repo root 下，避免从 OpenJudge/ 等子目录启动导致输出落盘位置漂移
+        self.output_dir = resolve_under_repo(output_dir, anchor_file=__file__)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # 输出文件路径

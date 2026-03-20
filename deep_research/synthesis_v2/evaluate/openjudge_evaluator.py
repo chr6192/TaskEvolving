@@ -77,6 +77,12 @@ class OpenJudgeEvaluator(EvaluatorBase):
     ) -> TrajectoryData:
         """将WorkflowOutput转换为TrajectoryData"""
         from deep_research.synthesis.core.data_structures import ToolCall, ToolResponse
+
+        # evaluator 内部统一合并上下文：
+        # - `context` 通常来自 WorkflowInput.metadata
+        # - `workflow_output.metadata` 通常包含 workflow 运行时产出的关键字段（如 query、rubrics 等）
+        # 这里以 workflow_output.metadata 为准（覆盖同名 key），保证评估输入完整且一致。
+        merged_context = {**(context or {}), **(workflow_output.metadata or {})}
         
         trajectory_id = str(uuid.uuid4())
         
@@ -101,15 +107,15 @@ class OpenJudgeEvaluator(EvaluatorBase):
         # 创建TrajectoryData
         trajectory = TrajectoryData(
             trajectory_id=trajectory_id,
-            skeleton_id=context.get('skeleton_id'),
-            query_id=context.get('query_id', str(uuid.uuid4())),
-            query=context.get('query'),
+            skeleton_id=merged_context.get('skeleton_id'),
+            query_id=merged_context.get('query_id', str(uuid.uuid4())),
+            query=merged_context.get('query'),
             messages=workflow_output.messages,
             tool_calls=tool_calls,
             tool_responses=tool_responses,
             metadata={
-                **workflow_output.metadata,
-                **context
+                **(context or {}),
+                **(workflow_output.metadata or {}),
             }
         )
         

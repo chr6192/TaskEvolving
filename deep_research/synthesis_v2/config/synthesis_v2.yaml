@@ -51,7 +51,8 @@ multi_turn:
   completion_callback: "deep_research.synthesis.core.dr_synthesis_completion_callback.DrSynthesisCompletionCallback"
   
   # tool_config_path: 工具配置文件路径（必需）
-  tool_config_path: "deep_research/config/tool_config/dr_tool_config_as.yaml"  # 默认工具配置
+  # tool_config_path: "deep_research/config/tool_config/dr_tool_config_as.yaml"  # 默认工具配置
+  tool_config_path: "deep_research/config/tool_config/test.yaml" 
 
 # Query生成配置
 query_generation:

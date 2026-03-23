@@ -68,8 +68,12 @@ async def example_single_sample():
     await evaluator.cleanup()
 
 
-async def example_complexity_exploration():
-    """示例4: Complexity exploration 调用 pipeline"""
+async def example_complexity_exploration(best_of_n: int = 1):
+    """示例4: Complexity exploration 调用 pipeline
+
+    Args:
+        best_of_n: 每轮 iteration 内部 best-of-n 采样数；<=1 等价于不启用（使用配置默认）。
+    """
     # 加载配置
     config_path = Path(__file__).parent / "config" / "synthesis_v2.yaml"
     config = OmegaConf.load(str(config_path))
@@ -104,8 +108,12 @@ async def example_complexity_exploration():
         metadata={"query_id": "seed_001"},
     )
 
-    # 执行exploration（内部会逐轮调用 pipeline.process，并把 traj/iteration 落盘到 outputs/complexity_exploration/<evolution_id>/）
-    evolution = await explorer.explore(seed_query)
+    # 执行 exploration（内部会逐轮调用 pipeline.process，并把 traj/iteration 落盘到 outputs/complexity_exploration/<evolution_id>/）
+    # best_of_n<=1 时传 None，让 orchestrator 使用配置默认值（通常 best_of_n=1 表示不启用拒绝采样）。
+    evolution = await explorer.explore(
+        seed_query,
+        best_of_n=None if best_of_n <= 1 else best_of_n,
+    )
 
     if evolution is None:
         print("exploration失败：未返回evolution")
@@ -121,7 +129,6 @@ async def example_complexity_exploration():
     await reviser.cleanup()
     await workflow.cleanup()
     await evaluator.cleanup()
-
 
 async def example_batch_processing():
     """示例2: 批处理 + Best of N"""
@@ -236,10 +243,11 @@ if __name__ == "__main__":
     # print("=" * 50)
     # asyncio.run(example_single_sample())
 
+    # 如果你想运行“每轮 best-of-n + 拒绝采样后再 revise”的版本，可以取消注释：
     print("\n" + "=" * 50)
-    print("示例4: Complexity exploration 调用 pipeline")
+    print("示例4b: 每轮 best-of-n + 只选1条再 revise")
     print("=" * 50)
-    asyncio.run(example_complexity_exploration())
+    asyncio.run(example_complexity_exploration(best_of_n=3))
     
     # print("\n" + "=" * 50)
     # print("示例2: 批处理 + Best of N")

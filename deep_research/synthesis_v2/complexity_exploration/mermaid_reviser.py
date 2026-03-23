@@ -96,6 +96,7 @@ class MermaidReviserAgent:
         # 这里只传递一次完整的 traj_k 结构（包含 query、工具调用、工具返回和最终回答），
         # 不再重复拆分后以多种形式传入，避免信息冗余。
         prompt = build_mermaid_revise_prompt(
+            mermaid_k=mermaid_k,
             traj_k=traj_k.to_dict(),
             metadata=metadata,
         )

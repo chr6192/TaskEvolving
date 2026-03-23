@@ -3,26 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass
 class BusinessMermaid:
     """
     Prompt 注入用的“业务流程 Mermaid”封装。
 
-    当前阶段先提供一个写死的 Mermaid 测试；后续可替换为 mermaid_k 注入。
+    允许实例创建，并作为system prompt的一部分注入给agent。
     """
-
     mermaid: str
-
-    @staticmethod
-    def test() -> "BusinessMermaid":
-        return BusinessMermaid(
-            mermaid=(
-                "flowchart TD\n"
-                "  A[用户提出问题] --> B[拆解任务与检索计划]\n"
-                "  B --> C[调用工具收集信息]\n"
-                "  C --> D[综合与写作输出]\n"
-            )
-        )
 
     def as_system_prompt_injection(self) -> str:
         return (

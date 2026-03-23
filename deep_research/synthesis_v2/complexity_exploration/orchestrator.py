@@ -11,6 +11,7 @@ from datetime import datetime
 from omegaconf import DictConfig
 
 from ..core.data_structures import WorkflowInput
+from ..core.batch_processor import BatchProcessor
 from ..core.pipeline import SamplePipeline
 from ..workflow.base import WorkflowBase
 from ..io.path_utils import resolve_under_repo
@@ -49,6 +50,12 @@ class ComplexityExplorationV2:
         
         self.max_iterations = self.exploration_config.get('max_iterations', 5)
         self.quality_threshold = self.exploration_config.get('quality_threshold', 0.7)
+
+        # 用于复杂度探索中的 Best-of-N（每轮 iteration 内部采样 N 次再选择 1 条）
+        try:
+            self.default_best_of_n = int(self.config.get("batch_processor", {}).get("best_of_n", 1))
+        except Exception:
+            self.default_best_of_n = 1
         
         logger.info(
             f"ComplexityExplorationV2初始化: "
@@ -56,17 +63,38 @@ class ComplexityExplorationV2:
             f"quality_threshold={self.quality_threshold}"
         )
     
-    async def explore(self, seed_query: QueryData) -> Optional[QueryEvolution]:
+    async def explore(
+        self,
+        seed_query: QueryData,
+        best_of_n: Optional[int] = None,
+    ) -> Optional[QueryEvolution]:
         """
         探索单个query的复杂度演化
         
         Args:
             seed_query: 种子query
+            best_of_n: 覆盖 best-of-n 采样数（每轮 iteration 内部使用；<=1 等价不启用）
             
         Returns:
             演化过程（包含所有迭代）
         """
         logger.info(f"开始复杂度探索: {seed_query.query_id}")
+
+        effective_best_of_n = (
+            self.default_best_of_n if best_of_n is None else int(best_of_n)
+        )
+        if effective_best_of_n < 1:
+            effective_best_of_n = 1
+
+        batch_processor: Optional[BatchProcessor] = None
+        if effective_best_of_n > 1:
+            # writer=None：本 orchestrator 自己负责落盘 traj/iteration，不走 BatchProcessor 的 selected/rejected 记录
+            batch_processor = BatchProcessor(
+                pipeline=self.pipeline,
+                batch_size=1,
+                best_of_n=effective_best_of_n,
+                writer=None,
+            )
         
         evolution = QueryEvolution(
             evolution_id=str(uuid.uuid4()),
@@ -115,8 +143,18 @@ class ComplexityExplorationV2:
                         # 兜底：保持兼容旧格式
                         workflow_input.metadata["rubrics"] = rubric
                 
-                # 2. 调用pipeline处理
-                result = await self.pipeline.process(workflow_input)
+                # 2. 调用pipeline处理（每轮内部 Best-of-N + 拒绝采样）
+                if batch_processor:
+                    selected_results = await batch_processor.process_batch([workflow_input])
+                    if not selected_results:
+                        logger.warning(f"迭代 {iteration_id + 1} best-of-n 选优为空")
+                        evolution.converged = True
+                        evolution.convergence_reason = "best_of_n_empty"
+                        break
+                    # selected_results 理论上只包含 1 条（因为只有 1 个原始 input）
+                    result = selected_results[0]
+                else:
+                    result = await self.pipeline.process(workflow_input)
                 
                 if not result.success:
                     logger.warning(f"迭代 {iteration_id + 1} pipeline失败")
@@ -134,7 +172,8 @@ class ComplexityExplorationV2:
                 logger.info(f"迭代 {iteration_id + 1} 质量分数: {quality_score:.4f}")
 
                 # 4. 构造 traj_k（TrajectoryData 视图），供 reviser 使用
-                traj_k = self._convert_to_trajectory(result.output, workflow_input.metadata)
+                # 用“被选中的那条结果”的 metadata 作为 context，保证每轮 best-of-n 的选择信息能跟着传下去
+                traj_k = self._convert_to_trajectory(result.output, result.input.metadata)
 
                 # 5. 落盘 traj_k.jsonl（每轮单独一个文件，便于复盘）
                 traj_path = evolution_dir / f"traj_{iteration_id}.jsonl"

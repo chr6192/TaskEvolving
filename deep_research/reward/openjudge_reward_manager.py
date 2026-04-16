@@ -102,7 +102,7 @@ class OpenJudgeRewardManager:
     - Filling reward tensor
     
     Example:
-        reward_fn = OpenJudgeRewardFunction(model_name="qwen3-max")
+        reward_fn = OpenJudgeRewardFunction(model_name="qwen3.6-plus")
         manager = OpenJudgeRewardManager(
             tokenizer=tokenizer,
             num_examine=5,

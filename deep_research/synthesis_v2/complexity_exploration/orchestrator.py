@@ -5,7 +5,6 @@
 import logging
 import uuid
 import json
-from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 from omegaconf import DictConfig
@@ -13,7 +12,6 @@ from omegaconf import DictConfig
 from ..core.data_structures import WorkflowInput
 from ..core.batch_processor import BatchProcessor
 from ..core.pipeline import SamplePipeline
-from ..workflow.base import WorkflowBase
 from ..io.path_utils import resolve_under_repo
 from deep_research.synthesis.core.data_structures import (
     QueryData,
@@ -24,6 +22,7 @@ from deep_research.synthesis.core.data_structures import (
     ToolResponse,
 )
 from .mermaid_reviser import MermaidReviserAgent
+from ..mermaid import Mermaid
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,6 @@ class ComplexityExplorationV2:
         self.exploration_config = config.get('complexity_exploration', {})
         
         self.max_iterations = self.exploration_config.get('max_iterations', 5)
-        self.quality_threshold = self.exploration_config.get('quality_threshold', 0.7)
 
         # 用于复杂度探索中的 Best-of-N（每轮 iteration 内部采样 N 次再选择 1 条）
         try:
@@ -59,8 +57,7 @@ class ComplexityExplorationV2:
         
         logger.info(
             f"ComplexityExplorationV2初始化: "
-            f"max_iterations={self.max_iterations}, "
-            f"quality_threshold={self.quality_threshold}"
+            f"max_iterations={self.max_iterations}"
         )
     
     async def explore(
@@ -104,7 +101,7 @@ class ComplexityExplorationV2:
         )
         
         current_query = seed_query
-        mermaid: Optional[str] = None
+        mermaid: Optional[Mermaid] = None
         rubric: Optional[dict] = None
 
         output_root = resolve_under_repo(
@@ -114,6 +111,10 @@ class ComplexityExplorationV2:
         evolution_dir = output_root / evolution.evolution_id
         evolution_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"ComplexityExplorationV2 落盘目录: {evolution_dir.resolve()}")
+
+        # 汇总文件 iterations.json：每轮增量写入 query / mermaid / rubric 摘要，便于一次性复盘
+        iterations_path = evolution_dir / "iterations.json"
+        iteration_summaries: List[dict] = []
         
         for iteration_id in range(self.max_iterations):
             logger.info(
@@ -130,7 +131,7 @@ class ComplexityExplorationV2:
                         'query_id': current_query.query_id,
                         'query': current_query.content,
                         'iteration_id': iteration_id,
-                        'mermaid': mermaid,
+                        'mermaid': mermaid.to_str() if mermaid else None,
                     }
                 )
                 
@@ -175,6 +176,7 @@ class ComplexityExplorationV2:
                 # 用“被选中的那条结果”的 metadata 作为 context，保证每轮 best-of-n 的选择信息能跟着传下去
                 traj_k = self._convert_to_trajectory(result.output, result.input.metadata)
 
+
                 # 5. 落盘 traj_k.jsonl（每轮单独一个文件，便于复盘）
                 traj_path = evolution_dir / f"traj_{iteration_id}.jsonl"
                 with traj_path.open("w", encoding="utf-8") as f:
@@ -191,16 +193,17 @@ class ComplexityExplorationV2:
                         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         "evaluation_scores": result.evaluation.scores if result.evaluation else {},
                         "evaluation_details": result.evaluation.details if result.evaluation else {},
-                        "mermaid": mermaid,
+                        "mermaid": mermaid.to_str() if mermaid else None,
                         "rubric": rubric,
                         "traj_k_path": str(traj_path),
+                        "query_fuzzified": (current_query.metadata or {}).get("query_fuzzified"),
                     }
                 )
                 evolution.iterations.append(iteration_data)
 
                 # 7. 调用 reviser：mermaid, traj_k -> mermaid_next, query_next, rubric_next
                 revise_out = await self.reviser.revise(
-                    mermaid_k=mermaid,
+                    mermaid_k=mermaid.to_str() if mermaid else None,
                     traj_k=traj_k,
                     metadata={
                         "iteration_id": iteration_id,
@@ -208,36 +211,31 @@ class ComplexityExplorationV2:
                         "evaluation_output": evaluation_output,
                     },
                 )
-                mermaid_next = revise_out["mermaid"]
-                query_next = revise_out["query"]
+                mermaid_next = Mermaid.from_str(revise_out["mermaid"] or "")
                 rubric_next = revise_out["rubric"]
+                query_next = revise_out["query"]
+                query_fuzzified_next = revise_out["query_fuzzified"]
 
-                # 8. 落盘 iteration_k.json（按规划字段）
-                iteration_path = evolution_dir / f"iteration_{iteration_id}.json"
-                with iteration_path.open("w", encoding="utf-8") as f:
-                    json.dump(
-                        {
-                            "query_k": current_query.content,
-                            "mermaid_k": mermaid,
-                            "rubric_k": rubric,
-                            "score_k": quality_score,
-                            "details_k": evaluation_output.get("details", {}),
-                            "traj_k_path": str(traj_path),
-                            "next": {
-                                "mermaid_{k+1}": mermaid_next,
-                                "query_{k+1}": query_next,
-                                "rubric_{k+1}": rubric_next,
-                            },
-                        },
-                        f,
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-                logger.info(f"已写入 iteration: {iteration_path.resolve()}")
+
+                # 7.5 写入 iterations.json（每轮增量更新；即使后续失败也能保留已完成轮次），不要保留 next 信息，因为会在下一轮保存
+                iteration_summaries.append(
+                    {
+                        "iteration_id": iteration_id,
+                        "query": current_query.content,
+                        "query_fuzzified": (current_query.metadata or {}).get("query_fuzzified"),
+                        "mermaid": mermaid.to_str() if mermaid else None,
+                        "depth": mermaid.depth() if mermaid else None,
+                        "rubric": rubric,
+                    }
+                )
+                with iterations_path.open("w", encoding="utf-8") as f:
+                    json.dump(iteration_summaries, f, ensure_ascii=False, indent=2)
                 
-                # 9. 判断是否继续
+                # 8. 判断是否继续
                 should_continue, reason = self._should_continue_exploration(
-                    quality_score, iteration_id, evolution
+                    iteration_id=iteration_id,
+                    current_mermaid=mermaid,
+                    next_mermaid=mermaid_next,
                 )
                 
                 if not should_continue:
@@ -256,6 +254,7 @@ class ComplexityExplorationV2:
                         **(current_query.metadata or {}),
                         "from_evolution_id": evolution.evolution_id,
                         "from_iteration_id": iteration_id,
+                        "query_fuzzified": query_fuzzified_next,
                     },
                 )
                 
@@ -319,9 +318,9 @@ class ComplexityExplorationV2:
     
     def _should_continue_exploration(
         self,
-        quality_score: float,
         iteration_id: int,
-        evolution: QueryEvolution
+        current_mermaid: Optional[Mermaid],
+        next_mermaid: Optional[Mermaid],
     ) -> tuple[bool, str]:
         """
         判断是否应该继续探索
@@ -332,6 +331,30 @@ class ComplexityExplorationV2:
         # 检查迭代次数
         if iteration_id >= self.max_iterations - 1:
             return False, "max_iterations_reached"
+
+
+        # 按“深度是否增长”判断收敛
+        current_mermaid_depth = current_mermaid.depth() if current_mermaid else None
+        next_mermaid_depth = next_mermaid.depth() if next_mermaid else None
+        # - next 深度缺失：视为无法继续有效增长
+        # - current 有值且 next <= current：深度不再增长（或退化）
+
+        logger.info(
+            "迭代 %s mermaid深度: current=%s, next=%s",
+            iteration_id + 1,
+            current_mermaid_depth,
+            next_mermaid_depth,
+        )
+        if next_mermaid_depth is None:
+            return False, "mermaid_depth_unavailable"
+        if (
+            current_mermaid_depth is not None
+            and next_mermaid_depth <= current_mermaid_depth
+        ):
+            return (
+                False,
+                f"mermaid_depth_not_increasing_{current_mermaid_depth}_to_{next_mermaid_depth}",
+            )
         
         # # 检查质量分数阈值
         # if quality_score < self.quality_threshold:

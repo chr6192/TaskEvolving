@@ -50,7 +50,7 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
     
     Example:
         reward_fn = OpenJudgeRewardFunction(
-            model_name="qwen3-max",
+            model_name="qwen3.6-plus",
             temperature=0.0,
             grader_weights={
                 "financial_report_resolution": 0.3,
@@ -61,11 +61,12 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
     
     def __init__(
         self,
-        model_name: str = "qwen3-max",
+        model_name: str = "qwen3.6-plus",
         temperature: float = 0.0,
         language: LanguageEnum = LanguageEnum.ZH,
         max_concurrency: int = 32,
         grader_weights: Optional[Dict[str, float]] = None,
+        rubrics_only: bool = False,
         api_timeout: float = 120.0,
         max_retries: int = 5,
         **kwargs
@@ -80,6 +81,7 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
             max_concurrency: Max concurrent OpenAI requests
             grader_weights: Weights for aggregating grader scores.
                 If None, uses equal weights. Will be normalized automatically.
+            rubrics_only: If True, only enable the rubrics-based grader.
             api_timeout: API call timeout in seconds (default: 120s).
                 This is critical for long prompts and large context windows.
             max_retries: Maximum number of retries for API calls (default: 5).
@@ -94,8 +96,12 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
             }
         )
         
+        self.rubrics_only = rubrics_only
+
         # Create grader configs (graders can be reused)
-        self.grader_configs = self.create_grader_configs(self.model, language)
+        self.grader_configs = self.create_grader_configs(
+            self.model, language, rubrics_only=self.rubrics_only
+        )
         
         # Store parameters for creating GradingRunner on each call
         # (avoid Semaphore bound to different event loop issue)
@@ -116,7 +122,8 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
     def create_grader_configs(
         self,
         model: OpenAIChatModel,
-        language: LanguageEnum
+        language: LanguageEnum,
+        rubrics_only: bool = False,
     ) -> Dict[str, GraderConfig]:
         """
         Create grader configurations.
@@ -131,13 +138,26 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
         Returns:
             Dictionary of grader configurations
         """
+        rubrics_cfg = {
+            "rubrics_based_trajectory_performance": GraderConfig(
+                grader=RubricsBasedTrajectoryPerformance(model=model, language=language),
+                mapper=lambda data: {
+                    "messages": data["messages"],
+                    "rubrics": data.get("rubrics", []),
+                },
+            )
+        }
+
+        if rubrics_only:
+            return rubrics_cfg
+
         return {
             # Financial report quality evaluation
             "financial_report_resolution": GraderConfig(
                 grader=FinancialReportResolutionGrader(model=model, language=language),
                 mapper=lambda data: {
-                    "messages": data["messages"], 
-                    "chat_date": data.get("chat_date")
+                    "messages": data["messages"],
+                    "chat_date": data.get("chat_date"),
                 },
             ),
             # Factual accuracy evaluation
@@ -145,14 +165,7 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
                 grader=FinancialTrajectoryFaithfulGrader(model=model, language=language),
                 mapper=lambda data: {"messages": data["messages"]},
             ),
-            # Rubrics-based evaluation
-            "rubrics_based_trajectory_performance": GraderConfig(
-                grader=RubricsBasedTrajectoryPerformance(model=model, language=language),
-                mapper=lambda data: {
-                    "messages": data["messages"], 
-                    "rubrics": data.get("rubrics", [])
-                },
-            ),
+            **rubrics_cfg,
             # Comprehensive trajectory evaluation
             "trajectory_comprehensive": GraderConfig(
                 grader=TrajectoryComprehensiveGrader(model=model, language=language),
@@ -483,11 +496,12 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
 
 # Create default instance with standard parameters for training
 compute_score_async = OpenJudgeRewardFunction(
-    model_name="qwen3-30b-a3b-instruct-2507",
+    model_name="qwen3.6-plus",
     temperature=0.0,
     language=LanguageEnum.ZH,
     max_concurrency=16,
     grader_weights=None,  # Use equal weights by default
+    rubrics_only=True,
     api_timeout=180.0,
     max_retries=5,
     show_progress=True,

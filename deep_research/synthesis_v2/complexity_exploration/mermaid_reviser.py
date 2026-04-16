@@ -12,6 +12,7 @@ from deep_research.synthesis.core.structured_llm_client import StructuredLLMClie
 from deep_research.synthesis.prompts.mermaid_revise_prompt import (
     build_mermaid_revise_prompt,
 )
+from ..mermaid import Mermaid
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,12 @@ class RubricOutput(BaseModel):
 
 class MermaidRevisionOutput(BaseModel):
     mermaid: str = Field(description="DAG Mermaid flowchart 文本（可直接放入 prompt）")
-    query: str = Field(description="下一轮 query_{k+1}")
+    query: str = Field(
+        description="下一轮任务提问稿：尽量保留 Mermaid 所体现的多维度、依赖与约束，完整体现扩充后的复杂度，不刻意模糊，但仍不写逐步路径"
+    )
+    query_fuzzified: str = Field(
+        description="在 query 基础上的用户口吻、口语化模糊版（仅落盘/对照；编排器下一轮 user message 使用 query）"
+    )
     rubric: RubricOutput = Field(description="OpenJudge 兼容 rubric（dict 形态）")
 
 
@@ -41,7 +47,7 @@ class MermaidReviserAgent:
     Mermaid + Query + Rubric 统一产出 reviser（用模型生成）。
 
     输入：mermaid_k（可空）、traj_k、metadata（可选；其中可包含 evaluation_output）
-    输出：{"mermaid": str, "query": str, "rubric": dict}
+    输出：{"mermaid": str, "query": str, "query_fuzzified": str, "rubric": dict}
     """
 
     config: DictConfig
@@ -68,6 +74,18 @@ class MermaidReviserAgent:
             await self.llm_client.cleanup()
         self._initialized = False
 
+    def _to_json_safe(self, value: Any) -> Any:
+        """将 metadata 中的 Mermaid 等对象转换为可 JSON 序列化形态。"""
+        if isinstance(value, Mermaid):
+            return value.to_str()
+        if isinstance(value, dict):
+            return {k: self._to_json_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._to_json_safe(v) for v in value]
+        if isinstance(value, tuple):
+            return [self._to_json_safe(v) for v in value]
+        return value
+
     def _validate_mermaid(self, mermaid: str) -> None:
         """
         轻校验：
@@ -79,8 +97,9 @@ class MermaidReviserAgent:
             raise ValueError("reviser 输出 mermaid 为空")
 
         limit = int(self.config.complexity_exploration.reviser.get("mermaid_char_limit", 2000))
-        if len(m) > limit:
-            raise ValueError(f"reviser 输出 mermaid 过长: {len(m)} > {limit}")
+        # 先不启用长度限制
+        # if len(m) > limit:
+        #     raise ValueError(f"reviser 输出 mermaid 过长: {len(m)} > {limit}")
 
     async def revise(
         self,
@@ -95,6 +114,7 @@ class MermaidReviserAgent:
         # 控制 prompt 长度：只给 LLM 必要信息
         # 这里只传递一次完整的 traj_k 结构（包含 query、工具调用、工具返回和最终回答），
         # 不再重复拆分后以多种形式传入，避免信息冗余。
+        metadata = self._to_json_safe(metadata or {})
         prompt = build_mermaid_revise_prompt(
             mermaid_k=mermaid_k,
             traj_k=traj_k.to_dict(),
@@ -109,6 +129,9 @@ class MermaidReviserAgent:
 
         out = parsed.model_dump(mode="json")
         self._validate_mermaid(out.get("mermaid", ""))
+        for key in ("query", "query_fuzzified"):
+            if not (out.get(key) or "").strip():
+                raise ValueError(f"reviser 输出 {key} 为空")
 
         # 只保留轻量级、与追踪相关的字段，避免把完整 evaluation_output 挂在 rubric 上
         metadata = metadata or {}

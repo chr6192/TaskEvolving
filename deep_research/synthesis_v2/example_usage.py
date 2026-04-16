@@ -104,11 +104,11 @@ async def example_complexity_exploration(best_of_n: int = 1):
     # 准备seed query
     seed_query = QueryData(
         query_id="seed_001",
-        content="帮我分析一下贵州茅台最近的财报数据，并给出关键指标趋势与风险点。",
+        content="济南好玩的地方有哪些？",
         metadata={"query_id": "seed_001"},
     )
 
-    # 执行 exploration（内部会逐轮调用 pipeline.process，并把 traj/iteration 落盘到 outputs/complexity_exploration/<evolution_id>/）
+    # 执行 exploration（内部会逐轮调用 pipeline.process，并把 traj_*.jsonl 与 iterations.json 落盘到 outputs/complexity_exploration/<evolution_id>/）
     # best_of_n<=1 时传 None，让 orchestrator 使用配置默认值（通常 best_of_n=1 表示不启用拒绝采样）。
     evolution = await explorer.explore(
         seed_query,

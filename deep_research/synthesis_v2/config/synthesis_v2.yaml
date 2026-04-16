@@ -34,7 +34,7 @@ openai_api:
   rate_limit_max_wait: 120
   
   # 默认LLM参数
-  default_model_name: "qwen3-max"
+  default_model_name: "qwen3.6-plus"
   default_temperature: 0.7
   default_top_p: 0.9
   default_top_k: null
@@ -52,7 +52,7 @@ multi_turn:
   
   # tool_config_path: 工具配置文件路径（必需）
   # tool_config_path: "deep_research/config/tool_config/dr_tool_config_as.yaml"  # 默认工具配置
-  tool_config_path: "deep_research/config/tool_config/test.yaml" 
+  tool_config_path: "deep_research/config/tool_config/normal.yaml" 
 
 # Query生成配置
 query_generation:
@@ -90,7 +90,7 @@ skeleton:
 # Trajectory生成配置
 generation:
   rollout_n: 1
-  trajectory_prompt_template_path: "deep_research/synthesis/prompts/trajectory_generate_prompt.py"
+  trajectory_prompt_template_path: "deep_research/synthesis/prompts/trajectory_generate_prompt_general_search.py"
   max_concurrent_trajectories: 5  # Trajectory生成并发数
   
   # LLM参数配置
@@ -116,20 +116,17 @@ reward_function:
   # 初始化参数
   init_params:
     # OpenJudge通用参数
-    model_name: "qwen3-max"  # 评估模型
+    model_name: "qwen3.6-plus"  # 评估模型
     temperature: 0.0  # 评估温度（低温保证一致性）
     language: "zh"  # 评估语言 (zh/en)
     max_concurrency: 32  # 最大并发OpenAI请求数
     show_progress: true  # 是否显示进度条
+    rubrics_only: true  # 只启用rubrics-based grader，避免触发其它grader
     
     # Grader权重配置（可选）
     grader_weights:
-      financial_report_resolution: 0.2
-      financial_trajectory_faithfulness: 0.2
       rubrics_based_trajectory_performance: 0.2
-      trajectory_comprehensive: 0.2
-      observation_information_gain: 0.1
-      action_loop_detection: 0.1
+      # rubrics_only=true 时，其它grader不会被注册/调用；这里保留无效项会让人困惑，因此移除
 
 # 质量控制配置
 quality_control:
@@ -146,7 +143,7 @@ quality_control:
 # Complexity Exploration配置（可选）
 complexity_exploration:
   enabled: false  # 默认不启用（在示例中未使用）
-  max_iterations: 3
+  max_iterations: 10
   
   # 质量评分配置
   quality_scoring:

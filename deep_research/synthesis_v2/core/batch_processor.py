@@ -4,7 +4,7 @@
 """
 import asyncio
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 from copy import deepcopy
 
@@ -55,21 +55,34 @@ class BatchProcessor:
         Returns:
             处理结果列表（如果启用Best of N，则返回选中的结果）
         """
+        selected_results, _ = await self.process_batch_with_rejection(inputs)
+        return selected_results
+
+    async def process_batch_with_rejection(
+        self,
+        inputs: List[WorkflowInput],
+    ) -> Tuple[List[PipelineResult], List[PipelineResult]]:
+        """
+        批量处理，支持Best of N，并返回被选中与被拒绝的结果。
+
+        Returns:
+            (selected_results, rejected_results)
+        """
         if not inputs:
-            return []
-        
+            return [], []
+
         logger.info(f"开始批处理: {len(inputs)} 个输入")
-        
+
         # 1. 如果best_of_n > 1，复制每个输入n次
         expanded_inputs = self._expand_inputs_for_best_of_n(inputs)
         logger.info(f"扩展后输入数量: {len(expanded_inputs)}")
-        
+
         # 2. 并发处理所有样本
         all_results = await asyncio.gather(
             *[self.pipeline.process(inp) for inp in expanded_inputs],
             return_exceptions=True
         )
-        
+
         # 3. 过滤异常结果
         valid_results = []
         for result in all_results:
@@ -77,23 +90,25 @@ class BatchProcessor:
                 logger.error(f"Pipeline处理异常: {result}")
             else:
                 valid_results.append(result)
-        
+
         logger.info(f"成功处理 {len(valid_results)}/{len(all_results)} 个样本")
-        
+
         # 4. 追加写入所有结果
         if self.writer:
             await self.writer.append_results(valid_results)
-        
+
         # 5. 拒绝采样：如果启用Best of N
         if self.best_of_n > 1:
-            selected_results = await self._apply_rejection_sampling(
-                valid_results, 
-                inputs
+            selected_results, rejected_results = await self._apply_rejection_sampling(
+                valid_results,
+                inputs,
             )
-            logger.info(f"拒绝采样选出 {len(selected_results)} 个最佳样本")
-            return selected_results
-        
-        return valid_results
+            logger.info(
+                f"拒绝采样选出 {len(selected_results)} 个最佳样本，拒绝 {len(rejected_results)} 个候选样本"
+            )
+            return selected_results, rejected_results
+
+        return valid_results, []
     
     def _expand_inputs_for_best_of_n(
         self, 
@@ -125,7 +140,7 @@ class BatchProcessor:
         self, 
         all_results: List[PipelineResult], 
         original_inputs: List[WorkflowInput]
-    ) -> List[PipelineResult]:
+    ) -> Tuple[List[PipelineResult], List[PipelineResult]]:
         """
         拒绝采样：按原始输入分组，选择evaluate得分最高的
         
@@ -149,7 +164,8 @@ class BatchProcessor:
         logger.info(f"拒绝采样分组: {len(groups)} 组")
         
         # 每组选最佳
-        selected = []
+        selected: List[PipelineResult] = []
+        rejected: List[PipelineResult] = []
         for orig_id, group_results in groups.items():
             # 选择evaluation.score最高的
             best = max(
@@ -162,6 +178,7 @@ class BatchProcessor:
             for r in group_results:
                 if r != best:
                     r.input.metadata['selection_status'] = 'rejected'
+                    rejected.append(r)
             
             selected.append(best)
             
@@ -172,7 +189,7 @@ class BatchProcessor:
                     if r != best:
                         await self.writer.append_rejected_result(r)
         
-        return selected
+        return selected, rejected
     
     async def process_all(
         self, 

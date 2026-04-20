@@ -5,6 +5,7 @@
 import logging
 import uuid
 import json
+import re
 from typing import List, Optional
 from datetime import datetime
 from omegaconf import DictConfig
@@ -13,6 +14,7 @@ from ..core.data_structures import WorkflowInput
 from ..core.batch_processor import BatchProcessor
 from ..core.pipeline import SamplePipeline
 from ..io.path_utils import resolve_under_repo
+from ..io.streaming_writer import StreamingWriter
 from deep_research.synthesis.core.data_structures import (
     QueryData,
     QueryEvolution,
@@ -25,6 +27,36 @@ from .mermaid_reviser import MermaidReviserAgent
 from ..mermaid import Mermaid
 
 logger = logging.getLogger(__name__)
+
+_DIRNAME_SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _safe_dirname(name: str, max_len: int = 120) -> str:
+    """
+    将任意 query_id 清洗为安全的目录名（跨平台）。
+    """
+    name = (name or "").strip()
+    if not name:
+        return "empty_query_id"
+    cleaned = _DIRNAME_SAFE_RE.sub("_", name)
+    cleaned = cleaned.strip("._-")
+    if not cleaned:
+        cleaned = "query"
+    return cleaned[:max_len]
+
+
+def _allocate_unique_dir(base_dir):
+    """
+    若 base_dir 已存在，则追加 __2/__3...，避免覆盖。
+    """
+    if not base_dir.exists():
+        return base_dir
+    i = 2
+    while True:
+        candidate = base_dir.parent / f"{base_dir.name}__{i}"
+        if not candidate.exists():
+            return candidate
+        i += 1
 
 
 class ComplexityExplorationV2:
@@ -85,7 +117,7 @@ class ComplexityExplorationV2:
 
         batch_processor: Optional[BatchProcessor] = None
         if effective_best_of_n > 1:
-            # writer=None：本 orchestrator 自己负责落盘 traj/iteration，不走 BatchProcessor 的 selected/rejected 记录
+            # 先不注入 writer：等 evolution_dir 创建后再注入，确保写入目录正确
             batch_processor = BatchProcessor(
                 pipeline=self.pipeline,
                 batch_size=1,
@@ -108,9 +140,16 @@ class ComplexityExplorationV2:
             self.exploration_config.get("output_dir", "outputs/complexity_exploration"),
             anchor_file=__file__,
         )
-        evolution_dir = output_root / evolution.evolution_id
+        # 目录用 query_id 命名，便于断点续跑/人工检索；若冲突则自动加后缀避免覆盖
+        evolution_dir = _allocate_unique_dir(output_root / _safe_dirname(seed_query.query_id))
         evolution_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"ComplexityExplorationV2 落盘目录: {evolution_dir.resolve()}")
+
+        # 如果启用 best-of-n，让 BatchProcessor 也把 selected/rejected 落盘到 pipeline_results.jsonl 系列文件
+        if batch_processor:
+            batch_processor.writer = StreamingWriter(
+                str(evolution_dir / "best_of_n_pipeline_results")
+            )
 
         # 汇总文件 iterations.json：每轮增量写入 query / mermaid / rubric 摘要，便于一次性复盘
         iterations_path = evolution_dir / "iterations.json"
@@ -146,7 +185,7 @@ class ComplexityExplorationV2:
                 
                 # 2. 调用pipeline处理（每轮内部 Best-of-N + 拒绝采样）
                 if batch_processor:
-                    selected_results = await batch_processor.process_batch([workflow_input])
+                    selected_results, rejected_results = await batch_processor.process_batch_with_rejection([workflow_input])
                     if not selected_results:
                         logger.warning(f"迭代 {iteration_id + 1} best-of-n 选优为空")
                         evolution.converged = True
@@ -156,6 +195,7 @@ class ComplexityExplorationV2:
                     result = selected_results[0]
                 else:
                     result = await self.pipeline.process(workflow_input)
+                    rejected_results = []
                 
                 if not result.success:
                     logger.warning(f"迭代 {iteration_id + 1} pipeline失败")
@@ -182,6 +222,18 @@ class ComplexityExplorationV2:
                 with traj_path.open("w", encoding="utf-8") as f:
                     f.write(json.dumps(traj_k.to_dict(), ensure_ascii=False) + "\n")
                 logger.info(f"已写入 traj: {traj_path.resolve()}")
+
+                # 5.5 额外落盘：本轮 best-of-n 未被选中的候选（rejected）
+                if rejected_results:
+                    rejected_traj_path = evolution_dir / f"rejected_traj_{iteration_id}.jsonl"
+                    with rejected_traj_path.open("w", encoding="utf-8") as f:
+                        for rejected in rejected_results:
+                            traj_rejected = self._convert_to_trajectory(
+                                rejected.output,
+                                rejected.input.metadata,
+                            )
+                            f.write(json.dumps(traj_rejected.to_dict(), ensure_ascii=False) + "\n")
+                    logger.info(f"已写入 rejected traj: {rejected_traj_path.resolve()}")
                 
                 # 6. 保存迭代数据（进 evolution）
                 iteration_data = IterationData(
@@ -201,7 +253,22 @@ class ComplexityExplorationV2:
                 )
                 evolution.iterations.append(iteration_data)
 
-                # 7. 调用 reviser：mermaid, traj_k -> mermaid_next, query_next, rubric_next
+                # 7. 先写入 iterations.json（每轮增量更新）：
+                # 在 reviser 之前落盘，确保即便 reviser 失败/中断，也能保留已完成轮次。
+                iteration_summaries.append(
+                    {
+                        "iteration_id": iteration_id,
+                        "query": current_query.content,
+                        "query_fuzzified": (current_query.metadata or {}).get("query_fuzzified"),
+                        "mermaid": mermaid.to_str() if mermaid else None,
+                        "depth": mermaid.depth() if mermaid else None,
+                        "rubric": rubric,
+                    }
+                )
+                with iterations_path.open("w", encoding="utf-8") as f:
+                    json.dump(iteration_summaries, f, ensure_ascii=False, indent=2)
+
+                # 8. 调用 reviser：mermaid, traj_k -> mermaid_next, query_next, rubric_next
                 revise_out = await self.reviser.revise(
                     mermaid_k=mermaid.to_str() if mermaid else None,
                     traj_k=traj_k,
@@ -215,23 +282,8 @@ class ComplexityExplorationV2:
                 rubric_next = revise_out["rubric"]
                 query_next = revise_out["query"]
                 query_fuzzified_next = revise_out["query_fuzzified"]
-
-
-                # 7.5 写入 iterations.json（每轮增量更新；即使后续失败也能保留已完成轮次），不要保留 next 信息，因为会在下一轮保存
-                iteration_summaries.append(
-                    {
-                        "iteration_id": iteration_id,
-                        "query": current_query.content,
-                        "query_fuzzified": (current_query.metadata or {}).get("query_fuzzified"),
-                        "mermaid": mermaid.to_str() if mermaid else None,
-                        "depth": mermaid.depth() if mermaid else None,
-                        "rubric": rubric,
-                    }
-                )
-                with iterations_path.open("w", encoding="utf-8") as f:
-                    json.dump(iteration_summaries, f, ensure_ascii=False, indent=2)
                 
-                # 8. 判断是否继续
+                # 9. 判断是否继续
                 should_continue, reason = self._should_continue_exploration(
                     iteration_id=iteration_id,
                     current_mermaid=mermaid,

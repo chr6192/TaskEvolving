@@ -9,9 +9,7 @@ from pydantic import BaseModel, Field
 
 from deep_research.synthesis.core.data_structures import TrajectoryData
 from deep_research.synthesis.core.structured_llm_client import StructuredLLMClient
-from deep_research.synthesis.prompts.mermaid_revise_prompt import (
-    build_mermaid_revise_prompt,
-)
+from deep_research.synthesis.prompts.mermaid_revise_prompt_en import build_mermaid_revise_prompt
 from ..mermaid import Mermaid
 
 logger = logging.getLogger(__name__)
@@ -124,7 +122,7 @@ class MermaidReviserAgent:
         parsed = await self.llm_client.call_with_structured_output(
             prompt=prompt,
             response_model=MermaidRevisionOutput,
-            system_message="你输出必须严格符合给定的结构化 schema。",
+            system_message="Your output must strictly conform to the provided structured schema.",
         )
 
         out = parsed.model_dump(mode="json")

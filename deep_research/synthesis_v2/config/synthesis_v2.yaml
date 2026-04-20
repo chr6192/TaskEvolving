@@ -10,7 +10,7 @@ concurrency:
 # 批处理配置（新增 - synthesis_v2特有）
 batch_processor:
   batch_size: 10  # 批处理大小
-  best_of_n: 1  # Best of N采样数（1表示不启用，>1启用拒绝采样）
+  best_of_n: 3  # Best of N采样数（1表示不启用，>1启用拒绝采样）
 
 # 输出配置（新增 - synthesis_v2特有）
 writer:
@@ -26,10 +26,10 @@ openai_api:
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   organization: null
   timeout: 180  # 请求超时时间（秒）
-  max_retries: 8  # 最大重试次数
+  max_retries: 3  # 最大重试次数
   
   # 429配额超限重试配置
-  rate_limit_max_retries: 8
+  rate_limit_max_retries: 3
   rate_limit_initial_wait: 10
   rate_limit_max_wait: 120
   
@@ -90,7 +90,7 @@ skeleton:
 # Trajectory生成配置
 generation:
   rollout_n: 1
-  trajectory_prompt_template_path: "deep_research/synthesis/prompts/trajectory_generate_prompt_general_search.py"
+  trajectory_prompt_template_path: "deep_research/synthesis/prompts/trajectory_generate_prompt_general_search_en.py"
   max_concurrent_trajectories: 5  # Trajectory生成并发数
   
   # LLM参数配置
@@ -118,7 +118,7 @@ reward_function:
     # OpenJudge通用参数
     model_name: "qwen3.6-plus"  # 评估模型
     temperature: 0.0  # 评估温度（低温保证一致性）
-    language: "zh"  # 评估语言 (zh/en)
+    language: "en"  # 评估语言 (zh/en)
     max_concurrency: 32  # 最大并发OpenAI请求数
     show_progress: true  # 是否显示进度条
     rubrics_only: true  # 只启用rubrics-based grader，避免触发其它grader

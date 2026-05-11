@@ -5,3 +5,15 @@ loguru
 tensorboard
 swanlab
 async_lru
+numpy
+tqdm
+pyyaml
+jsonlines
+datasets
+transformers
+accelerate
+peft
+sentencepiece
+tiktoken
+modelscope
+ms-swift

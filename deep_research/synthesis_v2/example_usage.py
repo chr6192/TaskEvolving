@@ -3,6 +3,7 @@
 """
 import asyncio
 import json
+import os
 from pathlib import Path
 from datetime import datetime
 from omegaconf import OmegaConf
@@ -21,11 +22,28 @@ from .complexity_exploration.mermaid_reviser import MermaidReviserAgent
 from deep_research.synthesis.core.data_structures import QueryData
 
 
+def _load_config() -> "OmegaConf":
+    """
+    配置加载优先级：
+    1) 环境变量 SYNTHESIS_V2_CONFIG 指定的路径
+    2) 默认：本目录下 config/synthesis_v2.yaml
+    """
+    config_override = os.getenv("SYNTHESIS_V2_CONFIG")
+    if config_override:
+        config_path = Path(config_override)
+        if not config_path.is_absolute():
+            # 允许传相对路径（相对当前工作目录）
+            config_path = (Path.cwd() / config_path).resolve()
+    else:
+        config_path = Path(__file__).parent / "config" / "synthesis_v2.yaml"
+
+    return OmegaConf.load(str(config_path))
+
+
 async def example_single_sample():
     """示例1: 单条样本处理"""
     # 加载配置
-    config_path = Path(__file__).parent / "config" / "synthesis_v2.yaml"
-    config = OmegaConf.load(str(config_path))
+    config = _load_config()
     
     # 初始化并发管理器
     concurrency = ConcurrencyManager()
@@ -48,7 +66,7 @@ async def example_single_sample():
     
     # 准备输入
     input_data = WorkflowInput(
-        messages=[{"role": "user", "content": "帮我分析一下贵州茅台最近的财报数据"}],
+        messages=[{"role": "user", "content": "紫金矿业的股票代码是多少？"}],
         metadata={"query_id": "test_001"}
     )
     
@@ -75,8 +93,7 @@ async def example_complexity_exploration(best_of_n: int = 1):
         best_of_n: 每轮 iteration 内部 best-of-n 采样数；<=1 等价于不启用（使用配置默认）。
     """
     # 加载配置
-    config_path = Path(__file__).parent / "config" / "synthesis_v2.yaml"
-    config = OmegaConf.load(str(config_path))
+    config = _load_config()
 
     # 初始化并发管理器
     concurrency = ConcurrencyManager()
@@ -104,7 +121,7 @@ async def example_complexity_exploration(best_of_n: int = 1):
     # 准备seed query
     seed_query = QueryData(
         query_id="seed_001",
-        content="济南好玩的地方有哪些？",
+        content="紫金矿业的股票代码是多少？",
         metadata={"query_id": "seed_001"},
     )
 
@@ -133,8 +150,7 @@ async def example_complexity_exploration(best_of_n: int = 1):
 async def example_batch_processing():
     """示例2: 批处理 + Best of N"""
     # 加载配置
-    config_path = Path(__file__).parent / "config" / "synthesis_v2.yaml"
-    config = OmegaConf.load(str(config_path))
+    config = _load_config()
     
     # 初始化并发管理器
     concurrency = ConcurrencyManager()
@@ -192,8 +208,7 @@ async def example_query_generation():
     from .query_generation.query_workflow import QueryGeneratorWorkflow
     
     # 加载配置
-    config_path = Path(__file__).parent / "config" / "synthesis_v2.yaml"
-    config = OmegaConf.load(str(config_path))
+    config = _load_config()
     
     # Query生成不需要completion_callback
     

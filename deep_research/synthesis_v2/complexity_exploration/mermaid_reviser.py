@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from deep_research.synthesis.core.data_structures import TrajectoryData
 from deep_research.synthesis.core.structured_llm_client import StructuredLLMClient
-from deep_research.synthesis.prompts.mermaid_revise_prompt_en import build_mermaid_revise_prompt
+from deep_research.synthesis.prompts.mermaid_revise_prompt import build_mermaid_revise_prompt
 from ..mermaid import Mermaid
 
 logger = logging.getLogger(__name__)

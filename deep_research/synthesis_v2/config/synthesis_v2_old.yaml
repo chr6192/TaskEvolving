@@ -1,0 +1,212 @@
+# Synthesis V2 配置文件
+# 重构后的数据合成框架配置
+
+# ==================== 核心框架配置 ====================
+
+# 并发控制配置（新增 - synthesis_v2特有）
+concurrency:
+  max_workers: 32  # 全局最大并发数（控制同时执行的workflow数量）
+
+# 批处理配置（新增 - synthesis_v2特有）
+batch_processor:
+  batch_size: 10  # 批处理大小
+  best_of_n: 1  # Best of N采样数（1表示不启用，>1启用拒绝采样）
+
+# 输出配置（新增 - synthesis_v2特有）
+writer:
+  output_dir: "outputs/synthesis_v2"  # 输出目录
+  save_all_results: true  # 是否保存所有结果（包括rejected）
+  save_format: "jsonl"  # "jsonl" or "parquet"
+
+# ==================== OpenAI API 统一配置 ====================
+
+openai_api:
+  # API连接配置
+  api_key: null  # 留空，从环境变量 OPENAI_API_KEY 读取
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  organization: null
+  timeout: 180  # 请求超时时间（秒）
+  max_retries: 3  # 最大重试次数
+  
+  # 429配额超限重试配置
+  rate_limit_max_retries: 3
+  rate_limit_initial_wait: 10
+  rate_limit_max_wait: 120
+  
+  # 默认LLM参数
+  default_model_name: "qwen3.6-plus"
+  default_temperature: 0.7
+  default_top_p: 0.9
+  default_top_k: null
+  default_max_tokens: 64000
+
+# ==================== Workflow组件配置 ====================
+
+# Multi-turn agent配置（底层依赖）
+# IMPORTANT: 这两个参数必须在运行时设置，否则无法执行trajectory生成
+multi_turn:
+  enable: true
+  max_turns: 20
+  format: "hermes"
+  completion_callback: "deep_research.synthesis.core.dr_synthesis_completion_callback.DrSynthesisCompletionCallback"
+  
+  # tool_config_path: 工具配置文件路径（必需）
+  # tool_config_path: "deep_research/config/tool_config/dr_tool_config_as.yaml"  # 默认工具配置
+  tool_config_path: "deep_research/config/tool_config/normal.yaml" 
+
+# Query生成配置
+query_generation:
+  num_queries: 50  # 总共要生成的查询数量
+  num_queries_per_batch: 10  # 每批生成的查询数量
+  max_queries_per_call: 20  # 单次LLM调用最多生成的查询数
+  max_concurrent_generation: 5  # 最大并发生成任务数
+  
+  # LLM参数配置
+  model_name: null  # null表示使用 default_model_name
+  api_key: null
+  base_url: null
+  temperature: 0.9  # Query生成需要较高创造性
+  top_p: 0.9
+  top_k: null
+  max_tokens: null
+
+# Skeleton生成配置
+skeleton:
+  prompt_template_path: "deep_research/synthesis/prompts/skeleton_generate_prompt.py"
+  max_steps: 5
+  validation_enabled: true
+  max_parse_retries: 5  # 解析失败时的最大重试次数
+  max_concurrent_skeletons: 3  # Skeleton生成并发数
+  
+  # LLM参数配置
+  model_name: null
+  api_key: null
+  base_url: null
+  temperature: null
+  top_p: null
+  top_k: null
+  max_tokens: null
+
+# Trajectory生成配置
+generation:
+  rollout_n: 1
+  trajectory_prompt_template_path: "deep_research/synthesis/prompts/trajectory_generate_prompt_general_search_en.py"
+  max_concurrent_trajectories: 5  # Trajectory生成并发数
+  
+  # LLM参数配置
+  model_name: null
+  api_key: null
+  base_url: null
+  temperature: null
+  top_p: null
+  top_k: null
+  max_tokens: 65536
+
+# ==================== 评估配置 ====================
+
+# ORM评估配置
+orm:
+  enabled: true  # 是否启用ORM评估
+
+# Reward function配置
+reward_function:
+  # Reward function类路径（必需）
+  class_path: 'deep_research.reward.openjudge_reward_function.OpenJudgeRewardFunction'
+  
+  # 初始化参数
+  init_params:
+    # OpenJudge通用参数
+    model_name: "qwen3.6-plus"  # 评估模型
+    temperature: 0.0  # 评估温度（低温保证一致性）
+    language: "en"  # 评估语言 (zh/en)
+    max_concurrency: 32  # 最大并发OpenAI请求数
+    show_progress: true  # 是否显示进度条
+    rubrics_only: true  # 只启用rubrics-based grader，避免触发其它grader
+    
+    # Grader权重配置（可选）
+    grader_weights:
+      rubrics_based_trajectory_performance: 0.2
+      # rubrics_only=true 时，其它grader不会被注册/调用；这里保留无效项会让人困惑，因此移除
+
+# 质量控制配置
+quality_control:
+  min_skeleton_steps: 1
+  max_skeleton_steps: 5
+  min_trajectory_turns: 2
+  max_trajectory_turns: 25
+  filter_invalid_trajectories: true
+  filter_low_quality_trajectories: true
+  quality_threshold: 0.0
+
+# ==================== 可选功能配置 ====================
+
+# Complexity Exploration配置（可选）
+complexity_exploration:
+  enabled: false  # 默认不启用（在示例中未使用）
+  max_iterations: 10
+  
+  # 质量评分配置
+  quality_scoring:
+    strategy: "average"  # "best", "average", or "weighted_average"
+    dimensions: [financial_resolution_reward, rubrics_reward]
+    weights: {}
+    use_rubrics_in_quality: false
+  
+  # 收敛判断配置
+  quality_threshold: 0.7
+  judgment_mode: "above_threshold"
+  min_complexity_increase: 0.1
+  
+  # Query Reviser配置
+  reviser:
+    prompt_template_path: "deep_research/synthesis/prompts/query_revise_prompt.py"
+    model_name: null
+    api_key: null
+    base_url: null
+    temperature: 0.8  # Reviser需要较高创造性
+    top_p: null
+    top_k: null
+    max_tokens: null
+  
+  # Rubrics评估配置
+  rubrics_evaluation:
+    enabled: true
+    model_name: null
+    api_key: null
+    base_url: null
+    temperature: 0.3  # 评估需要低温度
+    top_p: null
+    top_k: null
+    max_tokens: null
+  
+  # 并发控制
+  max_concurrent_explorations: 4
+  
+  # 数据保存
+  save_all_iterations: true
+  output_dir: "outputs/complexity_exploration"
+
+# ==================== 兼容性配置 ====================
+# 以下配置保留以兼容底层组件，但在synthesis_v2中不直接使用
+
+# 输入配置（底层组件可能需要）
+input:
+  queries_file: ""
+  batch_size: 1
+  max_data_count: null
+
+# 输出配置（底层组件可能需要）
+output:
+  generated_queries_dir: "outputs/generated_queries"
+  skeleton_dir: "outputs/skeletons"
+  trajectory_dir: "outputs/trajectories"
+  log_dir: "outputs/logs"
+  save_intermediate: true
+  save_training_data: false
+  export_format: "jsonl"
+
+# 实验配置（底层组件可能需要）
+experiment:
+  name: "synthesis_v2_experiment"
+  logging_level: "INFO"
+  save_detailed_logs: true

@@ -6,7 +6,7 @@ import logging
 import uuid
 import json
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime
 from omegaconf import DictConfig
 
@@ -91,6 +91,19 @@ class ComplexityExplorationV2:
             f"ComplexityExplorationV2初始化: "
             f"max_iterations={self.max_iterations}"
         )
+
+    def _review_expand_task_output(
+        self,
+        *,
+        stage1_out: Dict[str, str],
+        iteration_id: int,
+        traj_k: TrajectoryData,
+    ) -> Dict[str, str]:
+        """
+        扩展任务阶段后的可插拔钩子（默认直通）。
+        可在子类重写：对 stage1 的 mermaid 节点做人工/规则判断，再返回修订后的 mermaid/query。
+        """
+        return stage1_out
     
     async def explore(
         self,
@@ -154,6 +167,7 @@ class ComplexityExplorationV2:
         # 汇总文件 iterations.json：每轮增量写入 query / mermaid / rubric 摘要，便于一次性复盘
         iterations_path = evolution_dir / "iterations.json"
         iteration_summaries: List[dict] = []
+        no_depth_growth_streak = 0
         
         for iteration_id in range(self.max_iterations):
             logger.info(
@@ -268,26 +282,58 @@ class ComplexityExplorationV2:
                 with iterations_path.open("w", encoding="utf-8") as f:
                     json.dump(iteration_summaries, f, ensure_ascii=False, indent=2)
 
-                # 8. 调用 reviser：mermaid, traj_k -> mermaid_next, query_next, rubric_next
-                revise_out = await self.reviser.revise(
-                    mermaid_k=mermaid.to_str() if mermaid else None,
+                # 8. 调用 reviser（两阶段）：
+                # 扩展任务: mermaid + query
+                # rubric生成: rubric + query_fuzzified
+                reviser_metadata = {
+                    "iteration_id": iteration_id,
+                    "evolution_id": evolution.evolution_id,
+                    "evaluation_output": evaluation_output,
+                }
+                revise_stage1_out = await self.reviser.expand_task(
+                    mermaid=mermaid.to_str() if mermaid else None,
                     traj_k=traj_k,
-                    metadata={
-                        "iteration_id": iteration_id,
-                        "evolution_id": evolution.evolution_id,
-                        "evaluation_output": evaluation_output,
-                    },
+                    metadata=reviser_metadata,
                 )
-                mermaid_next = Mermaid.from_str(revise_out["mermaid"] or "")
-                rubric_next = revise_out["rubric"]
-                query_next = revise_out["query"]
-                query_fuzzified_next = revise_out["query_fuzzified"]
+                revise_stage1_out = self._review_expand_task_output(
+                    stage1_out=revise_stage1_out,
+                    iteration_id=iteration_id,
+                    traj_k=traj_k,
+                )
+                revise_stage2_out = await self.reviser.generate_rubric(
+                    stage1_mermaid=revise_stage1_out["mermaid"],
+                    stage1_query=revise_stage1_out["query"],
+                    metadata=reviser_metadata,
+                )
+                stage1_node_sources = revise_stage1_out.get("node_sources", [])
+                mermaid_next = Mermaid.from_str(revise_stage1_out["mermaid"] or "")
+                rubric_next = revise_stage2_out["rubric"]
+                query_next = revise_stage1_out["query"]
+                query_fuzzified_next = revise_stage2_out["query_fuzzified"]
+
+                # 将 stage1 的节点来源信息挂到本轮 metadata，并刷新 iterations.json 便于复盘。
+                iteration_data.metadata["node_sources"] = stage1_node_sources
+                iteration_summaries[-1]["node_sources"] = stage1_node_sources
+                with iterations_path.open("w", encoding="utf-8") as f:
+                    json.dump(iteration_summaries, f, ensure_ascii=False, indent=2)
+
+                current_mermaid_depth = mermaid.depth() if mermaid else None
+                next_mermaid_depth = mermaid_next.depth() if mermaid_next else None
+                if (
+                    next_mermaid_depth is not None
+                    and current_mermaid_depth is not None
+                    and next_mermaid_depth <= current_mermaid_depth
+                ):
+                    no_depth_growth_streak += 1
+                else:
+                    no_depth_growth_streak = 0
                 
                 # 9. 判断是否继续
                 should_continue, reason = self._should_continue_exploration(
                     iteration_id=iteration_id,
                     current_mermaid=mermaid,
                     next_mermaid=mermaid_next,
+                    no_depth_growth_streak=no_depth_growth_streak,
                 )
                 
                 if not should_continue:
@@ -373,6 +419,7 @@ class ComplexityExplorationV2:
         iteration_id: int,
         current_mermaid: Optional[Mermaid],
         next_mermaid: Optional[Mermaid],
+        no_depth_growth_streak: int,
     ) -> tuple[bool, str]:
         """
         判断是否应该继续探索
@@ -399,13 +446,11 @@ class ComplexityExplorationV2:
         )
         if next_mermaid_depth is None:
             return False, "mermaid_depth_unavailable"
-        if (
-            current_mermaid_depth is not None
-            and next_mermaid_depth <= current_mermaid_depth
-        ):
+        if no_depth_growth_streak >= 2:
             return (
                 False,
-                f"mermaid_depth_not_increasing_{current_mermaid_depth}_to_{next_mermaid_depth}",
+                "mermaid_depth_not_increasing_for_2_rounds"
+                f"_{current_mermaid_depth}_to_{next_mermaid_depth}",
             )
         
         # # 检查质量分数阈值

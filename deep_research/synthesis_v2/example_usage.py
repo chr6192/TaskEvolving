@@ -22,6 +22,33 @@ from .complexity_exploration.mermaid_reviser import MermaidReviserAgent
 from deep_research.synthesis.core.data_structures import QueryData
 
 
+class ExampleComplexityExplorationV2(ComplexityExplorationV2):
+    """示例专用：传给 reviser 的 trajectory 清洗 messages.content。"""
+
+    def _convert_to_trajectory(self, workflow_output, context):
+        traj = super()._convert_to_trajectory(workflow_output, context)
+        messages = list(traj.messages or [])
+
+        # 按需严格清洗：删除所有第一层 content 非空的消息。
+        cleaned_messages = []
+        for msg in messages:
+            if (
+                isinstance(msg, dict)
+                and isinstance(msg.get("content"), str)
+                and msg.get("content").strip()
+            ):
+                continue
+            cleaned_messages.append(msg)
+
+        # query 信息不传给 reviser
+        traj.query = None
+        if isinstance(traj.metadata, dict):
+            traj.metadata.pop("query", None)
+
+        traj.messages = cleaned_messages
+        return traj
+
+
 def _load_config() -> "OmegaConf":
     """
     配置加载优先级：
@@ -116,12 +143,13 @@ async def example_complexity_exploration(best_of_n: int = 1):
     # 创建reviser + exploration orchestrator
     reviser = MermaidReviserAgent(config)
     await reviser.initialize()
-    explorer = ComplexityExplorationV2(pipeline=pipeline, reviser=reviser, config=config)
+    explorer = ExampleComplexityExplorationV2(pipeline=pipeline, reviser=reviser, config=config)
 
     # 准备seed query
     seed_query = QueryData(
         query_id="seed_001",
-        content="紫金矿业的股票代码是多少？",
+        content="601899是哪只股票？",
+        # content="老友记里瑞秋演员是谁？",
         metadata={"query_id": "seed_001"},
     )
 
@@ -129,7 +157,7 @@ async def example_complexity_exploration(best_of_n: int = 1):
     # best_of_n<=1 时传 None，让 orchestrator 使用配置默认值（通常 best_of_n=1 表示不启用拒绝采样）。
     evolution = await explorer.explore(
         seed_query,
-        best_of_n=None if best_of_n <= 1 else best_of_n,
+        best_of_n=None if (best_of_n is None or best_of_n <= 1) else best_of_n,
     )
 
     if evolution is None:
@@ -262,7 +290,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 50)
     print("示例4b: 每轮 best-of-n + 只选1条再 revise")
     print("=" * 50)
-    asyncio.run(example_complexity_exploration(best_of_n=3))
+    asyncio.run(example_complexity_exploration(best_of_n=None))
     
     # print("\n" + "=" * 50)
     # print("示例2: 批处理 + Best of N")

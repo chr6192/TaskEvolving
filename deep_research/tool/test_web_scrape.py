@@ -20,8 +20,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from deep_research.tool.dr_tool_as import WebScrapeTool
-
-DEFAULT_URL = "https://hk.trip.com/blog/jinan-128-1day-itinerary-9998650110/"
+  
+DEFAULT_URL = "http://example.com"
 
 
 def _load_web_scrape_schema(config_path: Path) -> OpenAIFunctionToolSchema:

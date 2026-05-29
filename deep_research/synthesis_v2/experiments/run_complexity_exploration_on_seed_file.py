@@ -2,8 +2,8 @@
 读取 seeds jsonl，并对每条 QueryData 执行 ComplexityExplorationV2.explore。
 
 用法示例：
-  python -m deep_research.synthesis_v2.tools.run_complexity_exploration_on_seed_file \
-    --input deep_research/synthesis_v2/data/nq_open_seed_queries_1000.jsonl \
+  python /Users/xiaocan/agentRL/deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
+    --input deep_research/synthesis_v2/data/nq_ch.jsonl \
     --best-of-n 3
 """
 

@@ -147,6 +147,72 @@ class Mermaid:
             return None
         return max(dist.values()) if dist else None
 
+    def leaf_node_ids(self) -> list[str]:
+        """返回 DAG 中所有叶子节点（出度为 0）的 ID 列表。"""
+        flow = self.to_flowchart()
+        if not flow.edges:
+            return []
+
+        all_nodes: set[str] = set()
+        has_outgoing: set[str] = set()
+        for e in flow.edges:
+            all_nodes.add(e.src)
+            all_nodes.add(e.dst)
+            has_outgoing.add(e.src)
+
+        return sorted(n for n in all_nodes if n not in has_outgoing)
+
+    def _collect_ancestors(self, target: str) -> set[str]:
+        """回溯收集从任意根到 target 的所有祖先节点（含 target 本身）。"""
+        flow = self.to_flowchart()
+        # 构建反向邻接表
+        reverse_adj: dict[str, list[str]] = {}
+        for e in flow.edges:
+            reverse_adj.setdefault(e.dst, []).append(e.src)
+            reverse_adj.setdefault(e.src, [])
+
+        visited: set[str] = set()
+        stack = [target]
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            for parent in reverse_adj.get(node, []):
+                if parent not in visited:
+                    stack.append(parent)
+        return visited
+
+    def split_by_leaves(self) -> list[tuple[str, "Mermaid"]]:
+        """
+        按叶子节点拆分：对每个叶子，回溯所有祖先，保留相关边，生成子 Mermaid。
+
+        返回 [(leaf_node_id, sub_mermaid), ...] 列表。
+        """
+        leaves = self.leaf_node_ids()
+        if not leaves:
+            return []
+
+        flow = self.to_flowchart()
+        results: list[tuple[str, Mermaid]] = []
+        for leaf in leaves:
+            ancestor_nodes = self._collect_ancestors(leaf)
+            sub_edges = [e for e in flow.edges if e.src in ancestor_nodes and e.dst in ancestor_nodes]
+            sub_flow = MermaidFlowchart(direction=flow.direction, edges=sub_edges)
+            results.append((leaf, Mermaid.from_str(self.flowchart_to_str(sub_flow))))
+        return results
+
+    def node_labels(self) -> dict[str, str]:
+        """返回 {node_id: label} 映射（仅包含有标签的节点）。"""
+        flow = self.to_flowchart()
+        labels: dict[str, str] = {}
+        for e in flow.edges:
+            if e.src_label is not None:
+                labels.setdefault(e.src, e.src_label)
+            if e.dst_label is not None:
+                labels.setdefault(e.dst, e.dst_label)
+        return labels
+
     def as_system_prompt_injection(self) -> str:
         return (
             "\n\n"

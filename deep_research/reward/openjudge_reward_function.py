@@ -69,6 +69,8 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
         rubrics_only: bool = False,
         api_timeout: float = 120.0,
         max_retries: int = 5,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
         **kwargs
     ):
         """
@@ -85,15 +87,19 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
             api_timeout: API call timeout in seconds (default: 120s).
                 This is critical for long prompts and large context windows.
             max_retries: Maximum number of retries for API calls (default: 5).
+            base_url: OpenAI-compatible API base URL (falls back to OPENAI_BASE_URL env).
+            api_key: API key (falls back to OPENAI_API_KEY env).
             **kwargs: Additional arguments (e.g., show_progress)
         """
         self.model = OpenAIChatModel(
             model=model_name,
+            api_key=api_key,
+            base_url=base_url,
             temperature=temperature,
             client_args={
                 "timeout": api_timeout,
                 "max_retries": max_retries,
-            }
+            },
         )
         
         self.rubrics_only = rubrics_only
@@ -118,6 +124,7 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
         logger.info(f"Max concurrency: {max_concurrency}")
         logger.info(f"API timeout: {api_timeout}s")
         logger.info(f"Max retries: {max_retries}")
+        logger.info(f"Model: {model_name}, base_url: {base_url or 'env:OPENAI_BASE_URL'}")
     
     def create_grader_configs(
         self,

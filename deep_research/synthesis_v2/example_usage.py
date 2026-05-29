@@ -3,6 +3,7 @@
 """
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 from datetime import datetime
@@ -22,31 +23,16 @@ from .complexity_exploration.mermaid_reviser import MermaidReviserAgent
 from deep_research.synthesis.core.data_structures import QueryData
 
 
-class ExampleComplexityExplorationV2(ComplexityExplorationV2):
-    """示例专用：传给 reviser 的 trajectory 清洗 messages.content。"""
-
-    def _convert_to_trajectory(self, workflow_output, context):
-        traj = super()._convert_to_trajectory(workflow_output, context)
-        messages = list(traj.messages or [])
-
-        # 按需严格清洗：删除所有第一层 content 非空的消息。
-        cleaned_messages = []
-        for msg in messages:
-            if (
-                isinstance(msg, dict)
-                and isinstance(msg.get("content"), str)
-                and msg.get("content").strip()
-            ):
-                continue
-            cleaned_messages.append(msg)
-
-        # query 信息不传给 reviser
-        traj.query = None
-        if isinstance(traj.metadata, dict):
-            traj.metadata.pop("query", None)
-
-        traj.messages = cleaned_messages
-        return traj
+def _setup_logging() -> None:
+    # 默认 INFO，确保能看到接口 request_params 日志；可用 SYNTHESIS_LOG_LEVEL 覆盖。
+    level_name = os.getenv("SYNTHESIS_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        force=True,
+    )
+    logging.getLogger("deep_research").setLevel(level)
 
 
 def _load_config() -> "OmegaConf":
@@ -93,7 +79,7 @@ async def example_single_sample():
     
     # 准备输入
     input_data = WorkflowInput(
-        messages=[{"role": "user", "content": "紫金矿业的股票代码是多少？"}],
+        messages=[{"role": "user", "content": "哈尔滨有什么好吃的？"}],
         metadata={"query_id": "test_001"}
     )
     
@@ -143,13 +129,14 @@ async def example_complexity_exploration(best_of_n: int = 1):
     # 创建reviser + exploration orchestrator
     reviser = MermaidReviserAgent(config)
     await reviser.initialize()
-    explorer = ExampleComplexityExplorationV2(pipeline=pipeline, reviser=reviser, config=config)
+    explorer = ComplexityExplorationV2(pipeline=pipeline, reviser=reviser, config=config)
 
     # 准备seed query
     seed_query = QueryData(
         query_id="seed_001",
-        content="601899是哪只股票？",
+        content="代码000001股票今日价格是多少？",
         # content="老友记里瑞秋演员是谁？",
+        # content="哈尔滨好吃的有什么？",
         metadata={"query_id": "seed_001"},
     )
 
@@ -281,6 +268,7 @@ async def example_query_generation():
 
 
 if __name__ == "__main__":
+    _setup_logging()
     # print("=" * 50)
     # print("示例1: 单条样本处理")
     # print("=" * 50)

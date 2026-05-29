@@ -80,6 +80,9 @@ class ComplexityExplorationV2:
         self.exploration_config = config.get('complexity_exploration', {})
         
         self.max_iterations = self.exploration_config.get('max_iterations', 5)
+        self.max_consecutive_reasoning_nodes = int(
+            self.exploration_config.get("max_consecutive_reasoning_nodes", 5)
+        )
 
         # 用于复杂度探索中的 Best-of-N（每轮 iteration 内部采样 N 次再选择 1 条）
         try:
@@ -273,7 +276,10 @@ class ComplexityExplorationV2:
                     {
                         "iteration_id": iteration_id,
                         "query": current_query.content,
-                        "query_fuzzified": (current_query.metadata or {}).get("query_fuzzified"),
+                        "query_fuzzified": (
+                            (current_query.metadata or {}).get("query_fuzzified")
+                            or current_query.content
+                        ),
                         "mermaid": mermaid.to_str() if mermaid else None,
                         "depth": mermaid.depth() if mermaid else None,
                         "rubric": rubric,
@@ -282,9 +288,8 @@ class ComplexityExplorationV2:
                 with iterations_path.open("w", encoding="utf-8") as f:
                     json.dump(iteration_summaries, f, ensure_ascii=False, indent=2)
 
-                # 8. 调用 reviser（两阶段）：
-                # 扩展任务: mermaid + query
-                # rubric生成: rubric + query_fuzzified
+                # 8. 调用 reviser（仅第一阶段，不做叶子拆分）
+                # 输出直接使用 stage1 的 mermaid/query/rubric。
                 reviser_metadata = {
                     "iteration_id": iteration_id,
                     "evolution_id": evolution.evolution_id,
@@ -300,16 +305,28 @@ class ComplexityExplorationV2:
                     iteration_id=iteration_id,
                     traj_k=traj_k,
                 )
-                revise_stage2_out = await self.reviser.generate_rubric(
-                    stage1_mermaid=revise_stage1_out["mermaid"],
-                    stage1_query=revise_stage1_out["query"],
-                    metadata=reviser_metadata,
-                )
+                try:
+                    revise_stage2_out = await self.reviser.generate_query_fuzzified(
+                        stage1_out=revise_stage1_out,
+                        metadata=reviser_metadata,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "迭代 %s query_fuzzified 生成失败，按空值处理: %s",
+                        iteration_id + 1,
+                        e,
+                    )
+                    revise_stage2_out = {"query_fuzzified": ""}
                 stage1_node_sources = revise_stage1_out.get("node_sources", [])
                 mermaid_next = Mermaid.from_str(revise_stage1_out["mermaid"] or "")
-                rubric_next = revise_stage2_out["rubric"]
+                rubric_next = revise_stage1_out["rubric"]
                 query_next = revise_stage1_out["query"]
-                query_fuzzified_next = revise_stage2_out["query_fuzzified"]
+
+                # query_fuzzified 允许为空：若第二阶段失败或返回空，保留空字符串。
+                query_fuzzified_next = (
+                    revise_stage2_out.get("query_fuzzified", "") if revise_stage2_out else ""
+                )
+                leaf_queries_next: List[dict] = []
 
                 # 将 stage1 的节点来源信息挂到本轮 metadata，并刷新 iterations.json 便于复盘。
                 iteration_data.metadata["node_sources"] = stage1_node_sources
@@ -353,6 +370,7 @@ class ComplexityExplorationV2:
                         "from_evolution_id": evolution.evolution_id,
                         "from_iteration_id": iteration_id,
                         "query_fuzzified": query_fuzzified_next,
+                        "leaf_queries": leaf_queries_next,
                     },
                 )
                 
@@ -446,6 +464,23 @@ class ComplexityExplorationV2:
         )
         if next_mermaid_depth is None:
             return False, "mermaid_depth_unavailable"
+
+        # 连续推理节点链过长时停止（防止“单条推理节点无限延伸”）。
+        if self.max_consecutive_reasoning_nodes > 0 and next_mermaid:
+            max_reasoning_streak = self._max_consecutive_reasoning_chain(next_mermaid)
+            logger.info(
+                "迭代 %s 最长连续推理链长度: %s (阈值=%s)",
+                iteration_id + 1,
+                max_reasoning_streak,
+                self.max_consecutive_reasoning_nodes,
+            )
+            if max_reasoning_streak > self.max_consecutive_reasoning_nodes:
+                return (
+                    False,
+                    "reasoning_chain_too_long"
+                    f"_{max_reasoning_streak}_gt_{self.max_consecutive_reasoning_nodes}",
+                )
+
         if no_depth_growth_streak >= 2:
             return (
                 False,
@@ -466,6 +501,55 @@ class ComplexityExplorationV2:
         #         return False, f"insufficient_complexity_increase_{score_change:.2f}"
         
         return True, "continue"
+
+    def _max_consecutive_reasoning_chain(self, mermaid: Mermaid) -> int:
+        """
+        计算 DAG 中“连续推理性节点”最长链长度。
+        推理节点判定：节点 label 中包含“推理性”。
+        """
+        flow = mermaid.to_flowchart()
+        if not flow.edges:
+            return 0
+
+        nodes: set[str] = set()
+        indeg: Dict[str, int] = {}
+        adj: Dict[str, List[str]] = {}
+        for edge in flow.edges:
+            nodes.add(edge.src)
+            nodes.add(edge.dst)
+        for node_id in nodes:
+            indeg[node_id] = 0
+            adj[node_id] = []
+        for edge in flow.edges:
+            adj[edge.src].append(edge.dst)
+            indeg[edge.dst] += 1
+
+        labels = mermaid.node_labels()
+
+        def is_reasoning(node_id: str) -> bool:
+            label = labels.get(node_id, "")
+            return "推理性" in label
+
+        # 拓扑 DP：dp[n] 表示“以 n 结尾”的最长连续推理链长度。
+        dp: Dict[str, int] = {node_id: (1 if is_reasoning(node_id) else 0) for node_id in nodes}
+        q: List[str] = [node_id for node_id, d in indeg.items() if d == 0]
+        visited = 0
+
+        while q:
+            node_id = q.pop(0)
+            visited += 1
+            for nxt in adj[node_id]:
+                if is_reasoning(nxt):
+                    candidate = dp[node_id] + 1 if dp[node_id] > 0 else 1
+                    if candidate > dp[nxt]:
+                        dp[nxt] = candidate
+                indeg[nxt] -= 1
+                if indeg[nxt] == 0:
+                    q.append(nxt)
+
+        if visited != len(nodes):
+            return 0
+        return max(dp.values()) if dp else 0
     
     async def explore_batch(
         self, 

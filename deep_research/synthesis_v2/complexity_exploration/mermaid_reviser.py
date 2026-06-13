@@ -10,24 +10,38 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from deep_research.synthesis.core.data_structures import TrajectoryData
 from deep_research.synthesis.core.structured_llm_client import StructuredLLMClient
+from deep_research.synthesis_v2.core.language import VALID_NODE_TYPES, normalize_language
 from deep_research.synthesis_v2.prompts.revise_expand_task_prompt import (
     build_revise_expand_task_prompt,
 )
+from deep_research.synthesis_v2.prompts.revise_expand_task_prompt_en import (
+    build_revise_expand_task_prompt as build_revise_expand_task_prompt_en,
+)
 from deep_research.synthesis_v2.prompts.revise_rubric_prompt import (
     build_leaf_query_prompt,
+    build_revise_rubric_prompt,
+)
+from deep_research.synthesis_v2.prompts.revise_rubric_prompt_en import (
+    build_leaf_query_prompt as build_leaf_query_prompt_en,
+    build_revise_rubric_prompt as build_revise_rubric_prompt_en,
 )
 from ..mermaid import Mermaid
 
 logger = logging.getLogger(__name__)
 
 
-class RubricCriterion(BaseModel):
+class RubricCriterionLLM(BaseModel):
+    """Stage2 LLM 结构化输出（不含 weight，由程序按 mermaid 结构计算）。"""
+
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(description="唯一ID（稳定）")
+    node_id: str = Field(description="与 mermaid.nodes 中 node_id 完全一致")
     description: str = Field(description="评判标准描述")
-    weight: float = Field(description="权重(0-1)", ge=0.0, le=1.0)
     check_points: List[str] = Field(default_factory=list, description="检查点列表")
+
+
+class RubricCriterion(RubricCriterionLLM):
+    weight: float = Field(description="权重(0-1)，程序自下而上分配", ge=0.0, le=1.0)
 
 
 class RubricOutputCore(BaseModel):
@@ -36,7 +50,7 @@ class RubricOutputCore(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query_id: str = Field(description="与 query 对齐的 query_id")
-    criteria: List[RubricCriterion] = Field(description="rubric checklist")
+    criteria: List[RubricCriterionLLM] = Field(description="rubric checklist")
 
 
 class RubricOutput(BaseModel):
@@ -45,22 +59,40 @@ class RubricOutput(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-class NodeRubricCriterion(BaseModel):
+class MermaidGraphNode(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(description="节点唯一对应的 rubric criterion id")
-    description: str = Field(description="criterion 描述")
-    check_points: List[str] = Field(default_factory=list, description="criterion 检查点")
+    node_id: str = Field(description="节点ID（需与mermaid中的节点ID一致）")
+    node_type: str = Field(description="节点类型：事实型/Factual 或 推理型/Reasoning")
+    check_points: List[str] = Field(default_factory=list, description="该 Mermaid 节点对应的检查点")
+
+
+class MermaidGraphNodeWithSource(MermaidGraphNode):
+    source_type: str = Field(
+        description="节点来源类型：tool_call_response / query_or_reason_or_answer / previous_mermaid"
+    )
+    source_note: str = Field(description="来源+证据的合成描述（本轮审计用，不进入代码 Mermaid）")
+
+
+class MermaidGraphSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    structure: str = Field(description="DAG Mermaid flowchart 结构文本")
+    nodes: List[MermaidGraphNodeWithSource] = Field(
+        default_factory=list,
+        description="结构化节点信息（含本轮溯源字段，解析后仅保留 node_id/node_type/check_points）",
+    )
 
 
 class MermaidRevisionOutput(BaseModel):
-    mermaid: str = Field(description="DAG Mermaid flowchart 文本（可直接放入 prompt）")
+    mermaid: str = Field(description="完整 Mermaid 上下文（structure + nodes，可直接放入 prompt）")
+    structure: str = Field(description="DAG Mermaid flowchart 结构文本")
+    mermaid_nodes: List[MermaidGraphNode] = Field(
+        default_factory=list,
+        description="随 Mermaid 传递的结构化节点信息",
+    )
     query: str = Field(
         description="下一轮任务提问稿：尽量保留 Mermaid 所体现的多维度、依赖与约束，完整体现扩充后的复杂度，不刻意模糊，但仍不写逐步路径"
-    )
-    node_sources: List["MermaidNodeSource"] = Field(
-        default_factory=list,
-        description="每个节点的来源溯源信息（一节点一条）",
     )
     query_fuzzified: str = Field(
         description="在 query 基础上的用户口吻、口语化模糊版（仅落盘/对照；编排器下一轮 user message 使用 query）"
@@ -72,39 +104,29 @@ class MermaidRevisionOutput(BaseModel):
     rubric: RubricOutput = Field(description="OpenJudge 兼容 rubric（dict 形态）")
 
 
-class MermaidNodeSource(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    node_id: str = Field(description="节点ID（需与mermaid中的节点ID一致）")
-    node_text: str = Field(description="节点完整文本")
-    rubric_criterion: NodeRubricCriterion = Field(
-        description="该节点唯一对应的 rubric criterion（节点与criterion一一对应）",
-    )
-    source_type: str = Field(
-        description="节点来源类型：tool_call_response / query_or_reason_or_answer / previous_mermaid"
-    )
-    source_note: str = Field(description="来源+证据的合成描述")
-
-
 class MermaidRevisionStage1Output(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mermaid: str = Field(description="DAG Mermaid flowchart 文本（可直接放入 prompt）")
-    query: str = Field(
-        description="下一轮任务提问稿：尽量保留 Mermaid 所体现的多维度、依赖与约束，完整体现扩充后的复杂度，不刻意模糊，但仍不写逐步路径"
+    mermaid: MermaidGraphSpec = Field(
+        description="完整 Mermaid 对象，包含 structure 和 nodes（nodes 含本轮溯源字段，解析后不进入代码 Mermaid）"
     )
-    node_sources: List[MermaidNodeSource] = Field(
-        default_factory=list,
-        description="每个节点的来源溯源信息（一节点一条）",
-    )
+    query: str = Field(description="下一轮使用的扩展版 query（由 stage1 生成）")
+
+
+class MermaidRevisionStage2Output(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query_fuzzified: str = Field(description="扩展前 query 的模糊化版本")
+    rubric: RubricOutputCore = Field(description="与 mermaid 对齐的 rubric")
 
 
 class LeafQueryOutput(BaseModel):
-    """单条叶子子图的 LLM 输出：仅 query_fuzzified。"""
+    """叶子拆分子图输出（兼容旧接口）。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    query_fuzzified: str = Field(description="query 的用户口吻模糊版")
+    query_fuzzified: str = Field(description="扩展前 query 的模糊化版本")
+    rubric: RubricOutputCore = Field(description="子图 rubric")
 
 
 class MermaidLeafQuery(BaseModel):
@@ -112,7 +134,9 @@ class MermaidLeafQuery(BaseModel):
 
     leaf_node_id: str = Field(description="原始 mermaid 叶子节点ID")
     leaf_node_text: str = Field(description="原始 mermaid 叶子节点文本")
-    mermaid: str = Field(description="通向该叶子节点的子 mermaid（flowchart 语法）")
+    mermaid: str = Field(description="通向该叶子节点的完整 Mermaid 上下文")
+    mermaid_structure: str = Field(default="", description="通向该叶子节点的子 Mermaid 结构")
+    mermaid_nodes: List[MermaidGraphNode] = Field(default_factory=list, description="子 Mermaid 节点字段")
     rubric: Dict[str, Any] = Field(default_factory=dict, description="子 rubric")
     query_fuzzified: str = Field(default="", description="query 的用户口吻模糊版")
 
@@ -120,10 +144,10 @@ class MermaidLeafQuery(BaseModel):
 @dataclass
 class MermaidReviserAgent:
     """
-    Mermaid + Query + Rubric 统一产出 reviser（用模型生成）。
+    Mermaid + Query + Rubric 两阶段 reviser。
 
-    输入：mermaid_k（可空）、traj_k、metadata（可选；其中可包含 evaluation_output）
-    输出：{"mermaid": str, "query": str, "node_sources": list, "query_fuzzified": str, "leaf_queries": list, "rubric": dict}
+    Stage1 expand_task：mermaid + query（不产出 rubric、不算权重）
+    Stage2 generate_query_and_rubric：query_fuzzified + rubric（权重由程序按 mermaid 结构计算）
     """
 
     config: DictConfig
@@ -138,6 +162,12 @@ class MermaidReviserAgent:
 
         self.llm_client = StructuredLLMClient(self.config, model_name=model_name, component_config=reviser_cfg)
         self._initialized = False
+
+    @property
+    def language(self) -> str:
+        reviser_cfg = self.config.get("complexity_exploration", {}).get("reviser", {})
+        lang = reviser_cfg.get("language") or self.config.get("complexity_exploration", {}).get("language")
+        return normalize_language(lang)
 
     async def initialize(self) -> None:
         if getattr(self, "_initialized", False):
@@ -174,8 +204,14 @@ class MermaidReviserAgent:
         if not text:
             return False
 
+        cn_markers = ("# 你扮演的角色", "# 当前问题(query)")
+        en_markers = ("# Your role", "# Current question (query)")
+
+        def _is_template_prompt(body: str) -> bool:
+            return all(m in body for m in cn_markers) or all(m in body for m in en_markers)
+
         # 1) 原始 system prompt 文本
-        if "# 你扮演的角色" in text and "# 当前问题(query)" in text:
+        if _is_template_prompt(text):
             return True
 
         # 2) 被序列化为 JSON 字符串的 {"role":"system","content":"..."} 片段
@@ -188,9 +224,7 @@ class MermaidReviserAgent:
         if parsed.get("role") != "system":
             return False
         inner_content = parsed.get("content")
-        return isinstance(inner_content, str) and (
-            "# 你扮演的角色" in inner_content and "# 当前问题(query)" in inner_content
-        )
+        return isinstance(inner_content, str) and _is_template_prompt(inner_content)
 
     def _sanitize_traj_for_reviser(self, traj_k: TrajectoryData) -> Dict[str, Any]:
         """
@@ -221,147 +255,33 @@ class MermaidReviserAgent:
         return traj_dict
 
     @staticmethod
-    def split_mermaid_and_rubric(
+    def split_mermaid_by_leaves(
         stage1_out: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
         """
-        纯程序化拆分：按叶子节点拆 mermaid + rubric。
+        纯程序化拆分：按叶子节点拆 mermaid。
 
-        输入：expand_task() 的输出（含 mermaid, rubric, node_sources）。
-        输出：[{leaf_node_id, leaf_node_text, mermaid(str), rubric(dict)}, ...]
-
-        拆分逻辑：
-        1. 解析 mermaid 找到所有叶子节点；
-        2. 对每个叶子回溯祖先，生成子 mermaid；
-        3. 从 node_sources 收集子图涉及节点的 rubric_criterion_id；
-        4. 从 rubric.criteria 过滤出对应子集，组成子 rubric。
+        输入：expand_task() 的输出（含 mermaid, mermaid_nodes）。
+        输出：[{leaf_node_id, leaf_node_text, mermaid, mermaid_structure, mermaid_nodes}, ...]
         """
-        mermaid_obj = Mermaid.from_str(stage1_out.get("mermaid") or "")
+        mermaid_obj = Mermaid.from_str(
+            MermaidReviserAgent._structure_from_out(stage1_out),
+            nodes=stage1_out.get("mermaid_nodes") or [],
+        )
         splits = mermaid_obj.split_by_leaves()
         if not splits:
             return []
 
-        # 构建 node_id -> rubric_criterion_id 映射
-        node_sources = stage1_out.get("node_sources") or []
-        node_to_criterion: Dict[str, str] = {}
-        for ns in node_sources:
-            nid = (ns or {}).get("node_id", "")
-            criterion = (ns or {}).get("rubric_criterion") or {}
-            cid = criterion.get("id", "")
-            if nid and cid:
-                node_to_criterion[nid] = cid
-
-        # 全量 rubric criteria, 以 id 为 key
-        rubric = stage1_out.get("rubric") or {}
-        all_criteria = rubric.get("criteria") or []
-        criteria_by_id: Dict[str, Any] = {}
-        for c in all_criteria:
-            if isinstance(c, dict) and c.get("id"):
-                criteria_by_id[c["id"]] = c
-
-        # 节点标签（用于 leaf_node_text）
         labels = mermaid_obj.node_labels()
-
         results: List[Dict[str, Any]] = []
         for leaf_id, sub_mermaid in splits:
-            # 子图包含的节点集合
-            sub_flow = sub_mermaid.to_flowchart()
-            sub_node_ids: set[str] = set()
-            for e in sub_flow.edges:
-                sub_node_ids.add(e.src)
-                sub_node_ids.add(e.dst)
-
-            # --- 1) 按“叶子向上分配”规则计算节点权重 ---
-            # 规则：
-            # - 叶子节点初始权重 1；
-            # - 节点若有 n 个上游父节点，则向每个父节点分配 node_weight / n；
-            # - 节点值为来自所有下游分配的权重和；
-            # - 最后对所有节点权重做 sum 归一化。
-            parents: Dict[str, List[str]] = {nid: [] for nid in sub_node_ids}
-            indeg: Dict[str, int] = {nid: 0 for nid in sub_node_ids}
-            for e in sub_flow.edges:
-                parents[e.dst].append(e.src)
-                indeg[e.dst] += 1
-
-            # 拓扑排序后逆序传播（从下游到上游）
-            topo: List[str] = []
-            q: List[str] = [nid for nid, d in indeg.items() if d == 0]
-            # 使用简单 list 队列足够（节点规模小）
-            while q:
-                u = q.pop(0)
-                topo.append(u)
-                for edge in sub_flow.edges:
-                    if edge.src == u:
-                        indeg[edge.dst] -= 1
-                        if indeg[edge.dst] == 0:
-                            q.append(edge.dst)
-
-            node_weights: Dict[str, float] = {nid: 0.0 for nid in sub_node_ids}
-            if leaf_id in node_weights:
-                node_weights[leaf_id] = 1.0
-
-            for nid in reversed(topo):
-                w = node_weights.get(nid, 0.0)
-                p = parents.get(nid, [])
-                if not p or w <= 0:
-                    continue
-                share = w / float(len(p))
-                for pid in p:
-                    node_weights[pid] = node_weights.get(pid, 0.0) + share
-
-            # 节点权重 sum 归一化
-            total_node_weight = sum(node_weights.values())
-            if total_node_weight > 0:
-                node_weights = {nid: w / total_node_weight for nid, w in node_weights.items()}
-
-            # 收集该子图涉及的 rubric criteria ids
-            relevant_criteria_ids: set[str] = set()
-            for nid in sub_node_ids:
-                cid = node_to_criterion.get(nid)
-                if cid:
-                    relevant_criteria_ids.add(cid)
-
-            # 构建子 rubric
-            sub_criteria = [criteria_by_id[cid] for cid in relevant_criteria_ids if cid in criteria_by_id]
-
-            # --- 2) 用节点权重反推 criteria.weight ---
-            # 一节点一 criterion：节点权重直接累加到对应 criterion。
-            criterion_weights: Dict[str, float] = {
-                c["id"]: 0.0 for c in sub_criteria if isinstance(c, dict) and c.get("id")
-            }
-            for nid, nw in node_weights.items():
-                cid = node_to_criterion.get(nid)
-                if not cid or cid not in criterion_weights or nw <= 0:
-                    continue
-                criterion_weights[cid] += nw
-
-            # criterion 层再做一次归一化，确保最终 rubric weights 可直接使用
-            total_criterion_weight = sum(criterion_weights.values())
-            if total_criterion_weight > 0:
-                criterion_weights = {
-                    cid: w / total_criterion_weight for cid, w in criterion_weights.items()
-                }
-
-            sub_criteria_with_weight: List[Dict[str, Any]] = []
-            for c in sub_criteria:
-                cid = c.get("id")
-                c_new = dict(c)
-                if cid in criterion_weights:
-                    c_new["weight"] = float(criterion_weights[cid])
-                sub_criteria_with_weight.append(c_new)
-
-            sub_rubric = {
-                "query_id": rubric.get("query_id", ""),
-                "criteria": sub_criteria_with_weight,
-            }
-
             results.append({
                 "leaf_node_id": leaf_id,
                 "leaf_node_text": labels.get(leaf_id, leaf_id),
                 "mermaid": sub_mermaid.to_str(),
-                "rubric": sub_rubric,
+                "mermaid_structure": sub_mermaid.to_structure_str(),
+                "mermaid_nodes": sub_mermaid.node_dicts(),
             })
-
         return results
 
     def _validate_mermaid(self, mermaid: str) -> None:
@@ -383,28 +303,92 @@ class MermaidReviserAgent:
         self,
         *,
         mermaid: Optional[str],
+        mermaid_nodes: Optional[List[Dict[str, Any]]],
         traj_k: TrajectoryData,
         metadata: Dict[str, Any],
     ) -> str:
         sanitized_traj = self._sanitize_traj_for_reviser(traj_k)
-        return build_revise_expand_task_prompt(
+        builder = (
+            build_revise_expand_task_prompt_en
+            if self.language == "en"
+            else build_revise_expand_task_prompt
+        )
+        return builder(
             mermaid_k=mermaid,
+            mermaid_nodes=mermaid_nodes,
             traj_k=sanitized_traj,
+            metadata=metadata,
+        )
+
+    def _build_revise_rubric_prompt(
+        self,
+        *,
+        query: str,
+        mermaid: str,
+        metadata: Dict[str, Any],
+    ) -> str:
+        builder = (
+            build_revise_rubric_prompt_en
+            if self.language == "en"
+            else build_revise_rubric_prompt
+        )
+        return builder(
+            query=query,
+            mermaid=mermaid,
             metadata=metadata,
         )
 
     def _build_leaf_query_prompt(
         self,
         *,
+        stage1_query: str,
         sub_mermaid: str,
         sub_rubric: Dict[str, Any],
         metadata: Dict[str, Any],
     ) -> str:
-        return build_leaf_query_prompt(
+        builder = build_leaf_query_prompt_en if self.language == "en" else build_leaf_query_prompt
+        return builder(
+            stage1_query=stage1_query,
             sub_mermaid=sub_mermaid,
             sub_rubric=sub_rubric,
             metadata=metadata,
         )
+
+    def _validate_stage2_output(
+        self,
+        *,
+        out: Dict[str, Any],
+        stage1_out: Dict[str, Any],
+    ) -> None:
+        query_fuzzified = (out.get("query_fuzzified") or "").strip()
+        if not query_fuzzified:
+            raise ValueError("stage2 输出 query_fuzzified 为空")
+
+        rubric = out.get("rubric") or {}
+        criteria = rubric.get("criteria") or []
+        if not criteria:
+            raise ValueError("stage2 输出 rubric.criteria 为空")
+
+        mermaid_nodes = stage1_out.get("mermaid_nodes") or []
+        if len(criteria) != len(mermaid_nodes):
+            raise ValueError(
+                f"stage2 rubric 节点数不一致: criteria={len(criteria)} nodes={len(mermaid_nodes)}"
+            )
+
+        expected_ids = {
+            (node or {}).get("node_id", "")
+            for node in mermaid_nodes
+            if (node or {}).get("node_id")
+        }
+        actual_ids = {
+            self._criterion_node_id(c)
+            for c in criteria
+            if self._criterion_node_id(c)
+        }
+        if expected_ids != actual_ids:
+            raise ValueError(
+                f"stage2 rubric node_id 与 mermaid 节点不匹配: {sorted(actual_ids)} vs {sorted(expected_ids)}"
+            )
 
     def _attach_rubric_metadata(
         self,
@@ -424,163 +408,237 @@ class MermaidReviserAgent:
             **filtered_metadata,
         }
 
-    def _validate_node_sources_rubric_mapping(self, out: Dict[str, Any]) -> None:
-        node_sources = out.get("node_sources") or []
-        if not node_sources:
-            raise ValueError("reviser 输出 node_sources 为空")
+    @staticmethod
+    def _criterion_node_id(criterion: Any) -> str:
+        if not isinstance(criterion, dict):
+            return ""
+        node_id = (criterion.get("node_id") or "").strip()
+        if node_id:
+            return node_id
+        # 兼容旧格式：id=node_<node_id>
+        legacy_id = (criterion.get("id") or "").strip()
+        if legacy_id.startswith("node_"):
+            return legacy_id[len("node_") :]
+        return legacy_id
 
-        used_criterion_ids: set[str] = set()
-        for node in node_sources:
-            node_id = (node or {}).get("node_id", "<unknown>")
-            criterion = (node or {}).get("rubric_criterion") or {}
-            criterion_id = criterion.get("id", "")
-            check_points = criterion.get("check_points") or []
-            description = (criterion.get("description") or "").strip()
+    @staticmethod
+    def _compute_bottom_up_node_weights(
+        structure: str,
+        *,
+        focus_leaf_id: Optional[str] = None,
+    ) -> Dict[str, float]:
+        """
+        rubric 权重唯一算法入口：按 mermaid 结构自下而上分配节点权重。
+        - focus_leaf_id 指定时：该叶子初始权重 1.0（子图拆分场景）；
+        - 否则：所有叶子均分初始权重；
+        - 逆拓扑向上：节点将自身权重均分给所有父节点；
+        - 最后 sum 归一化。
+        """
+        flow = Mermaid.from_str(structure).to_flowchart()
+        if not flow.edges:
+            return {}
 
-            if not criterion_id:
-                raise ValueError(f"节点 {node_id} 缺少 rubric_criterion.id")
-            if not description:
-                raise ValueError(f"节点 {node_id} 的 rubric_criterion.description 为空")
-            if not check_points:
-                raise ValueError(f"节点 {node_id} 的 rubric_criterion.check_points 为空")
-            if criterion_id in used_criterion_ids:
-                raise ValueError(
-                    f"rubric_criterion.id 被多个节点复用（违反一对一约束）: {criterion_id}"
-                )
-            used_criterion_ids.add(criterion_id)
+        nodes: set[str] = set()
+        parents: Dict[str, List[str]] = {}
+        indeg: Dict[str, int] = {}
+        outdeg: Dict[str, int] = {}
+        for e in flow.edges:
+            nodes.add(e.src)
+            nodes.add(e.dst)
+        for nid in nodes:
+            parents[nid] = []
+            indeg[nid] = 0
+            outdeg[nid] = 0
+        for e in flow.edges:
+            parents[e.dst].append(e.src)
+            indeg[e.dst] += 1
+            outdeg[e.src] += 1
 
-    def _compose_rubric_from_node_sources(
+        leaves = [nid for nid in nodes if outdeg.get(nid, 0) == 0]
+        if not leaves:
+            return {}
+
+        node_weights: Dict[str, float] = {nid: 0.0 for nid in nodes}
+        if focus_leaf_id and focus_leaf_id in node_weights:
+            node_weights[focus_leaf_id] = 1.0
+        else:
+            leaf_weight = 1.0 / float(len(leaves))
+            for leaf_id in leaves:
+                node_weights[leaf_id] = leaf_weight
+
+        topo: List[str] = []
+        indeg_copy = dict(indeg)
+        q: List[str] = [nid for nid, d in indeg_copy.items() if d == 0]
+        while q:
+            u = q.pop(0)
+            topo.append(u)
+            for edge in flow.edges:
+                if edge.src == u:
+                    indeg_copy[edge.dst] -= 1
+                    if indeg_copy[edge.dst] == 0:
+                        q.append(edge.dst)
+
+        if len(topo) != len(nodes):
+            return {}
+
+        for nid in reversed(topo):
+            w = node_weights.get(nid, 0.0)
+            p = parents.get(nid, [])
+            if not p or w <= 0:
+                continue
+            share = w / float(len(p))
+            for pid in p:
+                node_weights[pid] = node_weights.get(pid, 0.0) + share
+
+        total = sum(node_weights.values())
+        if total <= 0:
+            return {}
+        return {nid: w / total for nid, w in node_weights.items()}
+
+    @staticmethod
+    def _assign_weights_to_criteria(
+        criteria: List[Dict[str, Any]],
+        structure: str,
+        *,
+        focus_leaf_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        n = len(criteria)
+        equal_fallback = {
+            MermaidReviserAgent._criterion_node_id(c): 1.0 / float(n)
+            for c in criteria
+            if MermaidReviserAgent._criterion_node_id(c)
+        } if n > 0 else {}
+
+        node_weights = MermaidReviserAgent._compute_bottom_up_node_weights(
+            structure,
+            focus_leaf_id=focus_leaf_id,
+        )
+
+        criterion_node_ids = {
+            MermaidReviserAgent._criterion_node_id(c)
+            for c in criteria
+            if MermaidReviserAgent._criterion_node_id(c)
+        }
+
+        if node_weights:
+            weights = {nid: 0.0 for nid in criterion_node_ids}
+            for nid, nw in node_weights.items():
+                if nid in weights and nw > 0:
+                    weights[nid] += nw
+            total = sum(weights.values())
+            if total > 0:
+                weights = {nid: w / total for nid, w in weights.items()}
+            else:
+                weights = equal_fallback
+        else:
+            weights = equal_fallback
+
+        result: List[Dict[str, Any]] = []
+        for c in criteria:
+            c_new = dict(c)
+            nid = MermaidReviserAgent._criterion_node_id(c_new)
+            c_new["weight"] = float(weights.get(nid, 0.0))
+            result.append(c_new)
+        return result
+
+    def _apply_rubric_weights(
         self,
         *,
         out: Dict[str, Any],
-        metadata: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        从 node_sources 自动组装 rubric（单一事实源）。
-        权重按整图“从底向上”分配：
-        1) 最后一层叶子节点先均分；
-        2) 每个节点将自身权重均分给所有父节点；
-        3) 节点层归一化后映射到 criterion.weight。
-        """
-        node_sources = out.get("node_sources") or []
-        criteria: List[Dict[str, Any]] = []
-        node_to_criterion: Dict[str, str] = {}
-        for node in node_sources:
-            criterion = dict((node or {}).get("rubric_criterion") or {})
-            node_id = (node or {}).get("node_id", "")
-            criterion_id = criterion.get("id", "")
-            if criterion:
-                criteria.append(criterion)
-            if node_id and criterion_id:
-                node_to_criterion[node_id] = criterion_id
+        stage1_out: Dict[str, Any],
+        focus_leaf_id: Optional[str] = None,
+    ) -> None:
+        rubric = out.get("rubric") or {}
+        criteria = rubric.get("criteria") or []
+        structure = self._structure_from_out(stage1_out)
+        weighted = self._assign_weights_to_criteria(
+            criteria,
+            structure,
+            focus_leaf_id=focus_leaf_id,
+        )
+        scorable: List[Dict[str, Any]] = []
+        for c in weighted:
+            if not isinstance(c, dict):
+                continue
+            check_points = c.get("check_points") or []
+            if isinstance(check_points, list) and any(str(cp).strip() for cp in check_points):
+                scorable.append(dict(c))
+        if not scorable:
+            raise ValueError("过滤 check_points 为空后 rubric.criteria 为空，无法评分")
 
-        n = len(criteria)
-        if n <= 0:
-            raise ValueError("无法从 node_sources 组装 rubric：criteria 为空")
+        total_weight = sum(float(c.get("weight") or 0.0) for c in scorable)
+        if total_weight <= 0:
+            equal_weight = 1.0 / float(len(scorable))
+            for c in scorable:
+                c["weight"] = equal_weight
+        else:
+            for c in scorable:
+                c["weight"] = float(c.get("weight") or 0.0) / total_weight
 
-        # 默认兜底等权（当 mermaid 非法/无边/无叶子/非 DAG 时使用）。
-        criterion_weights: Dict[str, float] = {
-            c["id"]: 1.0 / float(n)
-            for c in criteria
-            if isinstance(c, dict) and c.get("id")
-        }
+        out["rubric"]["criteria"] = scorable
 
-        mermaid_obj = Mermaid.from_str(out.get("mermaid") or "")
+        total_weight = sum(float((c or {}).get("weight") or 0.0) for c in scorable)
+        if abs(total_weight - 1.0) > 0.05:
+            raise ValueError(
+                f"过滤空 checkpoint 后 rubric 权重之和应为 1.0，实际为 {total_weight:.4f}"
+            )
+
+    @staticmethod
+    def _structure_from_out(out: Dict[str, Any]) -> str:
+        if out.get("structure"):
+            return str(out.get("structure") or "").strip()
+        if out.get("mermaid_structure"):
+            return str(out.get("mermaid_structure") or "").strip()
+        return Mermaid.from_str(out.get("mermaid") or "").to_structure_str()
+
+    def _validate_mermaid_nodes(self, out: Dict[str, Any]) -> None:
+        mermaid_nodes = out.get("mermaid_nodes") or []
+        if not mermaid_nodes:
+            raise ValueError("reviser 输出 mermaid_nodes 为空")
+
+        flow_node_ids: set[str] = set()
+        mermaid_obj = Mermaid.from_str(self._structure_from_out(out))
         flow = mermaid_obj.to_flowchart()
-        if flow.edges:
-            nodes: set[str] = set()
-            parents: Dict[str, List[str]] = {}
-            indeg: Dict[str, int] = {}
-            outdeg: Dict[str, int] = {}
-            for e in flow.edges:
-                nodes.add(e.src)
-                nodes.add(e.dst)
-            for nid in nodes:
-                parents[nid] = []
-                indeg[nid] = 0
-                outdeg[nid] = 0
-            for e in flow.edges:
-                parents[e.dst].append(e.src)
-                indeg[e.dst] += 1
-                outdeg[e.src] += 1
+        labels = mermaid_obj.node_labels()
+        for edge in flow.edges:
+            flow_node_ids.add(edge.src)
+            flow_node_ids.add(edge.dst)
 
-            leaves = [nid for nid in nodes if outdeg.get(nid, 0) == 0]
-            if leaves:
-                # 叶子先均分，然后向上分配。
-                node_weights: Dict[str, float] = {nid: 0.0 for nid in nodes}
-                leaf_weight = 1.0 / float(len(leaves))
-                for leaf_id in leaves:
-                    node_weights[leaf_id] = leaf_weight
+        seen_node_ids: set[str] = set()
+        for node in mermaid_nodes:
+            node_id = (node or {}).get("node_id", "")
+            node_type = ((node or {}).get("node_type") or "").strip()
+            check_points = (node or {}).get("check_points") or []
+            source_type = ((node or {}).get("source_type") or "").strip()
+            source_note = ((node or {}).get("source_note") or "").strip()
 
-                topo: List[str] = []
-                q: List[str] = [nid for nid, d in indeg.items() if d == 0]
-                while q:
-                    u = q.pop(0)
-                    topo.append(u)
-                    for edge in flow.edges:
-                        if edge.src == u:
-                            indeg[edge.dst] -= 1
-                            if indeg[edge.dst] == 0:
-                                q.append(edge.dst)
-
-                # 仅在 DAG 时启用该权重计算；否则保留等权兜底。
-                if len(topo) == len(nodes):
-                    for nid in reversed(topo):
-                        w = node_weights.get(nid, 0.0)
-                        p = parents.get(nid, [])
-                        if not p or w <= 0:
-                            continue
-                        share = w / float(len(p))
-                        for pid in p:
-                            node_weights[pid] = node_weights.get(pid, 0.0) + share
-
-                    total_node_weight = sum(node_weights.values())
-                    if total_node_weight > 0:
-                        node_weights = {
-                            nid: w / total_node_weight for nid, w in node_weights.items()
-                        }
-
-                        criterion_weights = {
-                            c["id"]: 0.0
-                            for c in criteria
-                            if isinstance(c, dict) and c.get("id")
-                        }
-                        for nid, nw in node_weights.items():
-                            cid = node_to_criterion.get(nid)
-                            if not cid or cid not in criterion_weights or nw <= 0:
-                                continue
-                            criterion_weights[cid] += nw
-
-                        total_criterion_weight = sum(criterion_weights.values())
-                        if total_criterion_weight > 0:
-                            criterion_weights = {
-                                cid: w / total_criterion_weight
-                                for cid, w in criterion_weights.items()
-                            }
-                        else:
-                            criterion_weights = {
-                                c["id"]: 1.0 / float(n)
-                                for c in criteria
-                                if isinstance(c, dict) and c.get("id")
-                            }
-
-        criteria_with_weight: List[Dict[str, Any]] = []
-        for c in criteria:
-            c_new = dict(c)
-            cid = c_new.get("id")
-            c_new["weight"] = float(criterion_weights.get(cid, 0.0))
-            criteria_with_weight.append(c_new)
-
-        composed_query_id = f"reviser_{metadata.get('evolution_id', 'unknown')}_{metadata.get('iteration_id', 'unknown')}"
-        return {
-            "query_id": composed_query_id,
-            "criteria": criteria_with_weight,
-        }
+            if not node_id:
+                raise ValueError("mermaid_nodes 存在空 node_id")
+            if node_id in seen_node_ids:
+                raise ValueError(f"mermaid_nodes 存在重复 node_id: {node_id}")
+            if flow_node_ids and node_id not in flow_node_ids:
+                raise ValueError(f"mermaid_nodes 节点 {node_id} 不存在于 mermaid 图中")
+            node_text = (labels.get(node_id) or "").strip()
+            if not node_text:
+                raise ValueError(f"mermaid.structure 节点 {node_id} 缺少 node_text 标签")
+            if node_type not in VALID_NODE_TYPES:
+                raise ValueError(
+                    f"mermaid_nodes 节点 {node_id} 的 node_type 非法: {node_type!r} "
+                    f"(expected one of {sorted(VALID_NODE_TYPES)})"
+                )
+            if not check_points:
+                raise ValueError(f"mermaid_nodes 节点 {node_id} 的 check_points 为空")
+            if source_type not in {"tool_call_response", "query_or_reason_or_answer", "previous_mermaid"}:
+                raise ValueError(f"mermaid_nodes 节点 {node_id} 的 source_type 非法")
+            if not source_note:
+                raise ValueError(f"mermaid_nodes 节点 {node_id} 的 source_note 为空")
+            seen_node_ids.add(node_id)
 
     async def expand_task(
         self,
         *,
         mermaid: Optional[str],
+        mermaid_nodes: Optional[List[Dict[str, Any]]] = None,
         traj_k: TrajectoryData,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -590,6 +648,7 @@ class MermaidReviserAgent:
         metadata = self._to_json_safe(metadata or {})
         prompt = self._build_expand_task_prompt(
             mermaid=mermaid,
+            mermaid_nodes=mermaid_nodes,
             traj_k=traj_k,
             metadata=metadata,
         )
@@ -600,11 +659,59 @@ class MermaidReviserAgent:
             system_message="Your output must strictly conform to the provided structured schema.",
         )
         out = parsed.model_dump(mode="json")
-        self._validate_mermaid(out.get("mermaid", ""))
+        mermaid_payload = out.get("mermaid") or {}
+        if not isinstance(mermaid_payload, dict):
+            raise ValueError("reviser 输出 mermaid 必须是对象")
+        structure = (mermaid_payload.get("structure") or "").strip()
+        mermaid_nodes_raw = mermaid_payload.get("nodes") or []
+        self._validate_mermaid(structure)
         if not (out.get("query") or "").strip():
-            raise ValueError("reviser 输出 query 为空")
-        self._validate_node_sources_rubric_mapping(out)
-        out["rubric"] = self._compose_rubric_from_node_sources(out=out, metadata=metadata)
+            raise ValueError("reviser stage1 输出 query 为空")
+        out["structure"] = structure
+        out["mermaid_nodes"] = mermaid_nodes_raw
+        self._validate_mermaid_nodes(out)
+        mermaid_obj = Mermaid.from_str(structure, nodes=mermaid_nodes_raw)
+        out["mermaid_nodes"] = mermaid_obj.node_dicts()
+        out["mermaid_structure"] = mermaid_obj.to_structure_str()
+        out["mermaid"] = mermaid_obj.to_str()
+        return out
+
+    async def generate_query_and_rubric(
+        self,
+        *,
+        stage1_out: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+        focus_leaf_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """基于 stage1 的 query 与 mermaid，生成 query_fuzzified 和 rubric。"""
+        if not getattr(self, "_initialized", False):
+            raise RuntimeError("MermaidReviserAgent 未初始化，请先调用 initialize()")
+
+        metadata = self._to_json_safe(metadata or {})
+        query = (stage1_out.get("query") or "").strip()
+        if not query:
+            raise ValueError("stage1 输出 query 为空，无法生成 query_fuzzified 和 rubric")
+        prompt = self._build_revise_rubric_prompt(
+            query=query,
+            mermaid=stage1_out.get("mermaid") or "",
+            metadata=metadata,
+        )
+        parsed = await self.llm_client.call_with_structured_output(
+            prompt=prompt,
+            response_model=MermaidRevisionStage2Output,
+            system_message="Your output must strictly conform to the provided structured schema.",
+        )
+        out = parsed.model_dump(mode="json")
+        self._validate_stage2_output(out=out, stage1_out=stage1_out)
+        composed_query_id = (
+            f"reviser_{metadata.get('evolution_id', 'unknown')}_{metadata.get('iteration_id', 'unknown')}"
+        )
+        out["rubric"]["query_id"] = composed_query_id
+        self._apply_rubric_weights(
+            out=out,
+            stage1_out=stage1_out,
+            focus_leaf_id=focus_leaf_id,
+        )
         self._attach_rubric_metadata(out=out, metadata=metadata)
         return out
 
@@ -615,7 +722,7 @@ class MermaidReviserAgent:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        程序拆分 mermaid + rubric，然后对每个子图调用 LLM 生成 query。
+        程序拆分 mermaid，然后对每个子图调用 Stage2 生成 query_fuzzified + rubric。
 
         返回: {"leaf_queries": [...]}
         """
@@ -625,25 +732,26 @@ class MermaidReviserAgent:
         metadata = self._to_json_safe(metadata or {})
 
         # 1. 程序化拆分
-        splits = self.split_mermaid_and_rubric(stage1_out)
+        splits = self.split_mermaid_by_leaves(stage1_out)
         if not splits:
             raise ValueError("mermaid 没有叶子节点，无法拆分")
 
-        # 2. 对每个子图调用 LLM 生成 query_fuzzified
+        # 2. 对每个子图调用 LLM 生成 query + rubric
         leaf_queries: List[Dict[str, Any]] = []
         for split_item in splits:
-            prompt = self._build_leaf_query_prompt(
-                sub_mermaid=split_item["mermaid"],
-                sub_rubric=split_item["rubric"],
+            sub_structure = split_item.get("mermaid_structure") or ""
+            stage2_out = await self.generate_query_and_rubric(
+                stage1_out={
+                    **stage1_out,
+                    "mermaid": split_item["mermaid"],
+                    "mermaid_structure": sub_structure,
+                    "structure": sub_structure,
+                    "mermaid_nodes": split_item.get("mermaid_nodes") or [],
+                },
                 metadata=metadata,
+                focus_leaf_id=split_item["leaf_node_id"],
             )
-            parsed = await self.llm_client.call_with_structured_output(
-                prompt=prompt,
-                response_model=LeafQueryOutput,
-                system_message="Your output must strictly conform to the provided structured schema.",
-            )
-            llm_out = parsed.model_dump(mode="json")
-            if not (llm_out.get("query_fuzzified") or "").strip():
+            if not (stage2_out.get("query_fuzzified") or "").strip():
                 raise ValueError(
                     f"LLM 为叶子 {split_item['leaf_node_id']} 生成的 query_fuzzified 为空"
                 )
@@ -652,8 +760,9 @@ class MermaidReviserAgent:
                 "leaf_node_id": split_item["leaf_node_id"],
                 "leaf_node_text": split_item["leaf_node_text"],
                 "mermaid": split_item["mermaid"],
-                "rubric": split_item["rubric"],
-                "query_fuzzified": llm_out["query_fuzzified"],
+                "mermaid_nodes": split_item.get("mermaid_nodes") or [],
+                "rubric": stage2_out["rubric"],
+                "query_fuzzified": stage2_out["query_fuzzified"],
             })
 
         return {"leaf_queries": leaf_queries}
@@ -663,48 +772,26 @@ class MermaidReviserAgent:
         *,
         stage1_out: Dict[str, Any],
         metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, str]:
-        """
-        不拆分子图，直接基于整张 mermaid + rubric 生成一条 query_fuzzified。
-        """
-        if not getattr(self, "_initialized", False):
-            raise RuntimeError("MermaidReviserAgent 未初始化，请先调用 initialize()")
-
-        metadata = self._to_json_safe(metadata or {})
-        sub_mermaid = (stage1_out.get("mermaid") or "").strip()
-        sub_rubric = stage1_out.get("rubric") or {"query_id": "", "criteria": []}
-
-        prompt = self._build_leaf_query_prompt(
-            sub_mermaid=sub_mermaid,
-            sub_rubric=sub_rubric,
+    ) -> Dict[str, Any]:
+        """向后兼容：委托 generate_query_and_rubric。"""
+        return await self.generate_query_and_rubric(
+            stage1_out=stage1_out,
             metadata=metadata,
         )
-        parsed = await self.llm_client.call_with_structured_output(
-            prompt=prompt,
-            response_model=LeafQueryOutput,
-            system_message="Your output must strictly conform to the provided structured schema.",
-        )
-        llm_out = parsed.model_dump(mode="json")
-        query_fuzzified = (llm_out.get("query_fuzzified") or "").strip()
-        if not query_fuzzified:
-            raise ValueError("LLM 生成的 query_fuzzified 为空")
-        return {"query_fuzzified": query_fuzzified}
 
     async def generate_rubric(
         self,
         *,
         stage1_mermaid: str,
         stage1_query: str,
-        stage1_rubric: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """向后兼容旧调用方。内部委托给 generate_leaf_queries。"""
-        # 构造一个最小 stage1_out 供 split 使用
         stage1_out = {
             "mermaid": stage1_mermaid,
+            "structure": Mermaid.from_str(stage1_mermaid).to_structure_str(),
+            "mermaid_nodes": [],
             "query": stage1_query,
-            "rubric": stage1_rubric or {"query_id": "", "criteria": []},
-            "node_sources": [],
         }
         return await self.generate_leaf_queries(stage1_out=stage1_out, metadata=metadata)
 
@@ -712,11 +799,17 @@ class MermaidReviserAgent:
         self,
         *,
         mermaid_k: Optional[str],
+        mermaid_nodes: Optional[List[Dict[str, Any]]] = None,
         traj_k: TrajectoryData,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """兼容旧接口：等价于 expand_task。"""
-        return await self.expand_task(mermaid=mermaid_k, traj_k=traj_k, metadata=metadata)
+        return await self.expand_task(
+            mermaid=mermaid_k,
+            mermaid_nodes=mermaid_nodes,
+            traj_k=traj_k,
+            metadata=metadata,
+        )
 
     async def revise_stage2(
         self,
@@ -745,23 +838,23 @@ class MermaidReviserAgent:
     ) -> Dict[str, Any]:
         stage1_out = await self.expand_task(
             mermaid=mermaid_k,
+            mermaid_nodes=None,
             traj_k=traj_k,
             metadata=metadata,
         )
-        stage2_out = await self.generate_leaf_queries(
+        stage2_out = await self.generate_query_and_rubric(
             stage1_out=stage1_out,
             metadata=metadata,
         )
-        leaf_queries = stage2_out.get("leaf_queries", [])
-        # 取第一个叶子的 query_fuzzified 作为总述（向后兼容）
-        query_fuzzified = leaf_queries[0].get("query_fuzzified", "") if leaf_queries else ""
         out = MermaidRevisionOutput(
             mermaid=stage1_out["mermaid"],
+            structure=stage1_out.get("mermaid_structure") or stage1_out.get("structure", ""),
+            mermaid_nodes=stage1_out.get("mermaid_nodes", []),
             query=stage1_out["query"],
-            node_sources=stage1_out.get("node_sources", []),
-            query_fuzzified=query_fuzzified,
-            leaf_queries=leaf_queries,
-            rubric=stage1_out["rubric"],
+            query_fuzzified=stage2_out["query_fuzzified"],
+            leaf_queries=[],
+            rubric=stage2_out["rubric"],
         ).model_dump(mode="json")
+        out["stage1_query"] = stage1_out.get("query", "")
         return out
 

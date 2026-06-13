@@ -1,9 +1,38 @@
 from __future__ import annotations
 
+import json
 import re
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
+
+
+@dataclass
+class MermaidNode:
+    """结构化节点定义。"""
+
+    node_id: str
+    node_type: str
+    check_points: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "node_type": self.node_type,
+            "check_points": list(self.check_points),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MermaidNode":
+        return cls(
+            node_id=str(data.get("node_id") or ""),
+            node_type=str(data.get("node_type") or ""),
+            check_points=[
+                str(item)
+                for item in (data.get("check_points") or [])
+                if item is not None
+            ],
+        )
 
 
 @dataclass
@@ -28,16 +57,46 @@ class MermaidFlowchart:
     edges: list[MermaidEdge] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(init=False)
 class Mermaid:
     """
     Mermaid 的统一入口：
-    - 原始字符串注入 prompt
+    - structure: 纯 flowchart 结构，用于解析、计算和渲染图
+    - nodes: 随图传递的节点语义字段
+    - to_str(): 注入 prompt 的完整 Mermaid 上下文（structure + nodes）
     - str <-> 结构化 flowchart
     - 统计最长路径节点深度（best-effort）
     """
 
-    mermaid: str
+    structure: str
+    nodes: list[MermaidNode]
+
+    def __init__(
+        self,
+        structure: str = "",
+        nodes: Optional[list[MermaidNode | dict[str, Any]]] = None,
+        mermaid: Optional[str] = None,
+    ) -> None:
+        # mermaid 参数仅为兼容旧调用；新代码请使用 structure。
+        if mermaid is not None and not structure:
+            structure = mermaid
+        self.structure = (structure or "").strip()
+        self.nodes = self._parse_nodes(nodes or [])
+
+    @staticmethod
+    def _parse_nodes(nodes: list[MermaidNode | dict[str, Any]]) -> list[MermaidNode]:
+        parsed_nodes: list[MermaidNode] = []
+        for node in nodes:
+            if isinstance(node, MermaidNode):
+                parsed_nodes.append(node)
+            elif isinstance(node, dict):
+                parsed_nodes.append(MermaidNode.from_dict(node))
+        return parsed_nodes
+
+    @property
+    def mermaid(self) -> str:
+        """兼容旧字段名；返回纯 flowchart 结构。"""
+        return self.structure
 
     @staticmethod
     def _extract_node_id_and_label(side: str) -> tuple[Optional[str], Optional[str]]:
@@ -56,15 +115,54 @@ class Mermaid:
         return (m2.group(1), None) if m2 else (None, None)
 
     @classmethod
-    def from_flowchart(cls, flowchart: MermaidFlowchart) -> "Mermaid":
-        return cls(mermaid=cls.flowchart_to_str(flowchart))
+    def from_flowchart(
+        cls,
+        flowchart: MermaidFlowchart,
+        nodes: Optional[list[MermaidNode]] = None,
+    ) -> "Mermaid":
+        return cls(
+            structure=cls.flowchart_to_str(flowchart),
+            nodes=nodes or [],
+        )
 
     @classmethod
-    def from_str(cls, mermaid: str) -> "Mermaid":
-        return cls(mermaid=(mermaid or "").strip())
+    def from_str(
+        cls,
+        mermaid: str,
+        nodes: Optional[list[MermaidNode | dict[str, Any]]] = None,
+    ) -> "Mermaid":
+        text = (mermaid or "").strip()
+        parsed_structure = cls._extract_fenced_block(text, "mermaid") or text
+        parsed_nodes = cls._parse_nodes(nodes or [])
+        if nodes is None:
+            nodes_json = cls._extract_fenced_block(text, "json")
+            if nodes_json:
+                try:
+                    raw_payload = json.loads(nodes_json)
+                except Exception:
+                    raw_payload = []
+                if isinstance(raw_payload, dict):
+                    parsed_nodes = cls._parse_nodes(raw_payload.get("nodes") or [])
+                elif isinstance(raw_payload, list):
+                    parsed_nodes = cls._parse_nodes(raw_payload)
+        return cls(
+            structure=parsed_structure,
+            nodes=parsed_nodes,
+        )
+
+    @staticmethod
+    def _extract_fenced_block(text: str, lang: str) -> Optional[str]:
+        pattern = rf"```{re.escape(lang)}\s*\n(.*?)\n```"
+        match = re.search(pattern, text or "", flags=re.DOTALL | re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    def node_dicts(self) -> list[dict[str, Any]]:
+        return [node.to_dict() for node in self.nodes]
 
     def to_flowchart(self) -> MermaidFlowchart:
-        lines = [ln.strip() for ln in (self.mermaid or "").splitlines() if ln.strip()]
+        lines = [ln.strip() for ln in (self.structure or "").splitlines() if ln.strip()]
         if not lines:
             return MermaidFlowchart()
 
@@ -109,8 +207,27 @@ class Mermaid:
             lines.append(f"{src} --> {dst}")
         return "\n".join(lines)
 
+    def to_structure_str(self) -> str:
+        """返回纯 flowchart 结构，不包含节点字段。"""
+        return (self.structure or "").strip()
+
     def to_str(self) -> str:
-        return (self.mermaid or "").strip()
+        """返回完整 Mermaid 上下文，包含 flowchart 结构和节点字段。"""
+        metadata_json = json.dumps(
+            {"nodes": self.node_dicts()},
+            ensure_ascii=False,
+            indent=2,
+        )
+        return (
+            "## Mermaid Structure\n"
+            "```mermaid\n"
+            f"{self.to_structure_str()}\n"
+            "```\n\n"
+            "## Mermaid Metadata\n"
+            "```json\n"
+            f"{metadata_json}\n"
+            "```"
+        ).strip()
 
     def depth(self) -> Optional[int]:
         flow = self.to_flowchart()
@@ -199,7 +316,15 @@ class Mermaid:
             ancestor_nodes = self._collect_ancestors(leaf)
             sub_edges = [e for e in flow.edges if e.src in ancestor_nodes and e.dst in ancestor_nodes]
             sub_flow = MermaidFlowchart(direction=flow.direction, edges=sub_edges)
-            results.append((leaf, Mermaid.from_str(self.flowchart_to_str(sub_flow))))
+            sub_node_ids = {e.src for e in sub_edges} | {e.dst for e in sub_edges}
+            sub_nodes = [node for node in self.nodes if node.node_id in sub_node_ids]
+            results.append((
+                leaf,
+                Mermaid.from_str(
+                    self.flowchart_to_str(sub_flow),
+                    nodes=sub_nodes,
+                ),
+            ))
         return results
 
     def node_labels(self) -> dict[str, str]:
@@ -217,9 +342,7 @@ class Mermaid:
         return (
             "\n\n"
             "# Mermaid 约束\n"
-            "你需要参考以下流程图来组织你的思考与行动步骤，确保整体流程不偏离。\n"
-            "```mermaid\n"
-            f"{self.mermaid}"
-            "```\n"
+            "你需要参考以下完整 Mermaid 上下文来组织你的思考与行动步骤，确保整体流程不偏离。\n"
+            f"{self.to_str()}\n"
         )
 

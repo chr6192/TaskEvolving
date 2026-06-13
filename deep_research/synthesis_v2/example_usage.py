@@ -134,7 +134,7 @@ async def example_complexity_exploration(best_of_n: int = 1):
     # 准备seed query
     seed_query = QueryData(
         query_id="seed_001",
-        content="代码000001股票今日价格是多少？",
+        content="塞缪尔·亚当斯冬季艾尔啤酒（Sam Adams Winter Ale）什么时候上市？",
         # content="老友记里瑞秋演员是谁？",
         # content="哈尔滨好吃的有什么？",
         metadata={"query_id": "seed_001"},

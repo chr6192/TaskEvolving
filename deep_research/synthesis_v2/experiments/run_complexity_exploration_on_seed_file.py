@@ -2,9 +2,19 @@
 读取 seeds jsonl，并对每条 QueryData 执行 ComplexityExplorationV2.explore。
 
 用法示例：
-  python /Users/xiaocan/agentRL/deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
-    --input deep_research/synthesis_v2/data/nq_ch.jsonl \
+  python deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
+    --language en \
     --best-of-n 3
+
+  # 最多 3 条 seed 并行探索（默认）
+  python deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
+    --max-concurrent-seeds 3 \
+    --limit 20
+
+  # 显式指定 seed 文件（覆盖语言默认数据集）
+  python deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
+    --input deep_research/synthesis_v2/data/nq_ch.jsonl \
+    --language cn
 """
 
 from __future__ import annotations
@@ -19,6 +29,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from omegaconf import OmegaConf
+
 
 def _prefer_local_repo_packages() -> None:
     """
@@ -38,6 +49,7 @@ from deep_research.synthesis.core.data_structures import QueryData
 from deep_research.synthesis_v2.complexity_exploration.mermaid_reviser import MermaidReviserAgent
 from deep_research.synthesis_v2.complexity_exploration.orchestrator import ComplexityExplorationV2
 from deep_research.synthesis_v2.core.concurrency import ConcurrencyManager
+from deep_research.synthesis_v2.core.language import apply_language_to_config, resolve_seed_file
 from deep_research.synthesis_v2.core.pipeline import SamplePipeline
 from deep_research.synthesis_v2.evaluate.openjudge_evaluator import OpenJudgeEvaluator
 from deep_research.synthesis_v2.io.path_utils import resolve_under_repo
@@ -92,16 +104,58 @@ def _iter_seed_records(path: Path) -> Iterable[QueryData]:
                 raise ValueError(f"Invalid QueryData at {path}:{line_no}: {e}") from e
 
 
+async def _explore_seed(
+    *,
+    job_index: int,
+    seed_query: QueryData,
+    explorer: ComplexityExplorationV2,
+    best_of_n: int,
+    semaphore: asyncio.Semaphore,
+    stats_lock: asyncio.Lock,
+    counters: dict[str, int],
+) -> None:
+    async with semaphore:
+        print(f"\n===== [{job_index}] explore query_id={seed_query.query_id} =====")
+        try:
+            evolution = await explorer.explore(
+                seed_query,
+                best_of_n=None if best_of_n <= 1 else best_of_n,
+            )
+            async with stats_lock:
+                if evolution is None:
+                    counters["fail"] += 1
+                    print(f"[{job_index}] FAILED: evolution=None")
+                else:
+                    counters["ok"] += 1
+                    converged = getattr(evolution, "converged", None)
+                    iters = getattr(evolution, "total_iterations", None)
+                    print(f"[{job_index}] OK: converged={converged} total_iterations={iters}")
+        except Exception as e:
+            async with stats_lock:
+                counters["fail"] += 1
+                print(f"[{job_index}] EXCEPTION: {type(e).__name__}: {e}")
+
+
 async def run(
-    seed_file: Path,
+    seed_file: Optional[Path],
     best_of_n: int,
     limit: Optional[int],
     start: int,
     api_key: Optional[str],
+    language: str,
+    max_concurrent_seeds: int,
 ) -> None:
-    seed_file = _resolve_repo_path(seed_file)
     config_path = Path(__file__).resolve().parents[1] / "config" / "synthesis_v2.yaml"
     config = OmegaConf.load(str(config_path))
+    language = apply_language_to_config(config, language)
+
+    seed_path = resolve_seed_file(language, str(seed_file) if seed_file else None)
+    seed_file = _resolve_repo_path(Path(seed_path))
+    if not seed_file.is_file():
+        raise FileNotFoundError(f"Seed file not found: {seed_file}")
+
+    print(f"Using language={language} pipeline")
+    print(f"Using seed_file={seed_file}")
 
     # 允许通过 CLI 传入 key（优先级最高），否则依赖环境变量 OPENAI_API_KEY 或配置文件内的 key
     if api_key:
@@ -135,45 +189,49 @@ async def run(
     )
     output_root.mkdir(parents=True, exist_ok=True)
     print(f"Using output_root={output_root}")
+    print(f"Using max_concurrent_seeds={max_concurrent_seeds}")
 
-    ok = 0
-    fail = 0
-    skipped = 0
+    pending: list[tuple[int, QueryData]] = []
+    skipped_prefilter = 0
     total_seen = 0
+    for idx, seed_query in enumerate(_iter_seed_records(seed_file), start=0):
+        if idx < start:
+            continue
+        total_seen += 1
+        if limit is not None and total_seen > limit:
+            break
+        if _already_ran(output_root, seed_query.query_id):
+            skipped_prefilter += 1
+            if skipped_prefilter % 50 == 1:
+                print(f"[skip] already done: {seed_query.query_id} (skipped={skipped_prefilter})")
+            continue
+        pending.append((total_seen, seed_query))
+
+    counters = {"ok": 0, "fail": 0, "skipped": skipped_prefilter}
+    semaphore = asyncio.Semaphore(max(1, max_concurrent_seeds))
+    stats_lock = asyncio.Lock()
+
     try:
-        for idx, seed_query in enumerate(_iter_seed_records(seed_file), start=0):
-            if idx < start:
-                continue
-            total_seen += 1
-            if limit is not None and total_seen > limit:
-                break
-
-            if _already_ran(output_root, seed_query.query_id):
-                skipped += 1
-                if skipped % 50 == 1:
-                    print(f"[skip] already done: {seed_query.query_id} (skipped={skipped})")
-                continue
-
-            print(f"\n===== [{total_seen}] explore query_id={seed_query.query_id} =====")
-            try:
-                evolution = await explorer.explore(
-                    seed_query,
-                    best_of_n=None if best_of_n <= 1 else best_of_n,
-                )
-                if evolution is None:
-                    fail += 1
-                    print(f"[{total_seen}] FAILED: evolution=None")
-                else:
-                    ok += 1
-                    converged = getattr(evolution, "converged", None)
-                    iters = getattr(evolution, "total_iterations", None)
-                    print(f"[{total_seen}] OK: converged={converged} total_iterations={iters}")
-            except Exception as e:
-                fail += 1
-                print(f"[{total_seen}] EXCEPTION: {type(e).__name__}: {e}")
-
+        if pending:
+            await asyncio.gather(
+                *[
+                    _explore_seed(
+                        job_index=job_index,
+                        seed_query=seed_query,
+                        explorer=explorer,
+                        best_of_n=best_of_n,
+                        semaphore=semaphore,
+                        stats_lock=stats_lock,
+                        counters=counters,
+                    )
+                    for job_index, seed_query in pending
+                ]
+            )
     finally:
-        print(f"\nDone. ok={ok} fail={fail} skipped={skipped}")
+        print(
+            f"\nDone. ok={counters['ok']} fail={counters['fail']} "
+            f"skipped={counters['skipped']} pending={len(pending)}"
+        )
         await reviser.cleanup()
         await workflow.cleanup()
         await evaluator.cleanup()
@@ -184,12 +242,28 @@ def main() -> None:
     parser.add_argument(
         "--input",
         type=str,
-        required=True,
-        help="Seed jsonl file. Each line must be QueryData-compatible JSON.",
+        default=None,
+        help=(
+            "Optional seed jsonl path. If omitted: cn -> data/nq_ch.jsonl, "
+            "en -> data/nq_open_seed_queries_1000.jsonl."
+        ),
     )
     parser.add_argument("--best-of-n", type=int, default=3)
+    parser.add_argument(
+        "--max-concurrent-seeds",
+        type=int,
+        default=3,
+        help="Max number of seeds to explore in parallel (default: 3; set 1 for serial).",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Only run N seeds (after --start).")
     parser.add_argument("--start", type=int, default=0, help="Skip first N seeds.")
+    parser.add_argument(
+        "--language",
+        type=str,
+        default="en",
+        choices=["en", "cn"],
+        help="Language switch: prompts, evaluation, and default seed dataset (default: cn).",
+    )
     parser.add_argument(
         "--api-key",
         type=str,
@@ -200,11 +274,13 @@ def main() -> None:
 
     asyncio.run(
         run(
-            seed_file=Path(args.input),
+            seed_file=Path(args.input) if args.input else None,
             best_of_n=args.best_of_n,
             limit=args.limit,
             start=args.start,
             api_key=args.api_key,
+            language=args.language,
+            max_concurrent_seeds=args.max_concurrent_seeds,
         )
     )
 

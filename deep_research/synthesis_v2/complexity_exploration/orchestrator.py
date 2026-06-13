@@ -13,6 +13,7 @@ from omegaconf import DictConfig
 from ..core.data_structures import WorkflowInput
 from ..core.batch_processor import BatchProcessor
 from ..core.pipeline import SamplePipeline
+from ..core.language import is_reasoning_node_type
 from ..io.path_utils import resolve_under_repo
 from ..io.streaming_writer import StreamingWriter
 from deep_research.synthesis.core.data_structures import (
@@ -95,6 +96,33 @@ class ComplexityExplorationV2:
             f"max_iterations={self.max_iterations}"
         )
 
+    @staticmethod
+    def _build_iteration_summary(
+        iteration_id: int,
+        query: str,
+        query_fuzzified: Optional[str],
+        mermaid: Optional[Mermaid],
+        rubric: Optional[dict],
+        *,
+        pipeline_ran: bool = True,
+    ) -> dict:
+        summary = {
+            "iteration_id": iteration_id,
+            "query": query,
+            "query_fuzzified": query_fuzzified or query,
+            "mermaid": mermaid.to_str() if mermaid else None,
+            "mermaid_structure": mermaid.to_structure_str() if mermaid else None,
+            "rubric": rubric,
+        }
+        if not pipeline_ran:
+            summary["pipeline_ran"] = False
+        return summary
+
+    @staticmethod
+    def _write_iteration_summaries(path, summaries: List[dict]) -> None:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(summaries, f, ensure_ascii=False, indent=2)
+    
     def _review_expand_task_output(
         self,
         *,
@@ -167,11 +195,11 @@ class ComplexityExplorationV2:
                 str(evolution_dir / "best_of_n_pipeline_results")
             )
 
-        # 汇总文件 iterations.json：每轮增量写入 query / mermaid / rubric 摘要，便于一次性复盘
+        # 汇总文件 iterations.json：每轮记录 pipeline 实际使用的 query / mermaid / rubric
         iterations_path = evolution_dir / "iterations.json"
         iteration_summaries: List[dict] = []
         no_depth_growth_streak = 0
-        
+        final_evolved_query: Optional[QueryData] = None
         for iteration_id in range(self.max_iterations):
             logger.info(
                 f"Query {seed_query.query_id} - 迭代 {iteration_id + 1}/{self.max_iterations} "
@@ -188,13 +216,14 @@ class ComplexityExplorationV2:
                         'query': current_query.content,
                         'iteration_id': iteration_id,
                         'mermaid': mermaid.to_str() if mermaid else None,
+                        'mermaid_structure': mermaid.to_structure_str() if mermaid else None,
+                        'mermaid_nodes': mermaid.node_dicts() if mermaid else [],
                     }
                 )
                 
-                # 如果有上一轮的rubric，加入metadata（传给 OpenJudge 的是 criteria 列表）
+                # 如果有上一轮的rubric，加入metadata（reviser 已过滤空 checkpoint 并归一化 weight）
                 if rubric:
                     if isinstance(rubric, dict) and "criteria" in rubric:
-                        # OpenJudge 只关心 rubrics checklist，本质是一个列表
                         workflow_input.metadata["rubrics"] = rubric["criteria"]
                     else:
                         # 兜底：保持兼容旧格式
@@ -263,6 +292,8 @@ class ComplexityExplorationV2:
                         "evaluation_scores": result.evaluation.scores if result.evaluation else {},
                         "evaluation_details": result.evaluation.details if result.evaluation else {},
                         "mermaid": mermaid.to_str() if mermaid else None,
+                        "mermaid_structure": mermaid.to_structure_str() if mermaid else None,
+                        "mermaid_nodes": mermaid.node_dicts() if mermaid else [],
                         "rubric": rubric,
                         "traj_k_path": str(traj_path),
                         "query_fuzzified": (current_query.metadata or {}).get("query_fuzzified"),
@@ -270,26 +301,19 @@ class ComplexityExplorationV2:
                 )
                 evolution.iterations.append(iteration_data)
 
-                # 7. 先写入 iterations.json（每轮增量更新）：
-                # 在 reviser 之前落盘，确保即便 reviser 失败/中断，也能保留已完成轮次。
+                # 7. 写入 iterations.json：记录本轮 pipeline 实际使用的 query / mermaid / rubric
                 iteration_summaries.append(
-                    {
-                        "iteration_id": iteration_id,
-                        "query": current_query.content,
-                        "query_fuzzified": (
-                            (current_query.metadata or {}).get("query_fuzzified")
-                            or current_query.content
-                        ),
-                        "mermaid": mermaid.to_str() if mermaid else None,
-                        "depth": mermaid.depth() if mermaid else None,
-                        "rubric": rubric,
-                    }
+                    self._build_iteration_summary(
+                        iteration_id,
+                        current_query.content,
+                        (current_query.metadata or {}).get("query_fuzzified"),
+                        mermaid,
+                        rubric,
+                    )
                 )
-                with iterations_path.open("w", encoding="utf-8") as f:
-                    json.dump(iteration_summaries, f, ensure_ascii=False, indent=2)
+                self._write_iteration_summaries(iterations_path, iteration_summaries)
 
-                # 8. 调用 reviser（仅第一阶段，不做叶子拆分）
-                # 输出直接使用 stage1 的 mermaid/query/rubric。
+                # 8. 调用 reviser：stage1 生成 mermaid+query，stage2 基于 stage1 query 生成 query_fuzzified+rubric
                 reviser_metadata = {
                     "iteration_id": iteration_id,
                     "evolution_id": evolution.evolution_id,
@@ -306,33 +330,39 @@ class ComplexityExplorationV2:
                     traj_k=traj_k,
                 )
                 try:
-                    revise_stage2_out = await self.reviser.generate_query_fuzzified(
+                    revise_stage2_out = await self.reviser.generate_query_and_rubric(
                         stage1_out=revise_stage1_out,
                         metadata=reviser_metadata,
                     )
                 except Exception as e:
                     logger.warning(
-                        "迭代 %s query_fuzzified 生成失败，按空值处理: %s",
+                        "迭代 %s query/rubric 生成失败: %s",
                         iteration_id + 1,
                         e,
                     )
-                    revise_stage2_out = {"query_fuzzified": ""}
-                stage1_node_sources = revise_stage1_out.get("node_sources", [])
-                mermaid_next = Mermaid.from_str(revise_stage1_out["mermaid"] or "")
-                rubric_next = revise_stage1_out["rubric"]
-                query_next = revise_stage1_out["query"]
-
-                # query_fuzzified 允许为空：若第二阶段失败或返回空，保留空字符串。
-                query_fuzzified_next = (
-                    revise_stage2_out.get("query_fuzzified", "") if revise_stage2_out else ""
+                    raise
+                stage1_mermaid_nodes = revise_stage1_out.get("mermaid_nodes", [])
+                stage1_query = revise_stage1_out.get("query", "")
+                mermaid_next = Mermaid.from_str(
+                    revise_stage1_out["mermaid"] or "",
+                    nodes=stage1_mermaid_nodes,
                 )
+                # stage1+stage2 都完成后赋值：下一轮 query 来自 stage1，rubric/query_fuzzified 来自 stage2
+                query_next = stage1_query
+                rubric_next = revise_stage2_out["rubric"]
+                query_fuzzified_next = revise_stage2_out["query_fuzzified"]
                 leaf_queries_next: List[dict] = []
-
-                # 将 stage1 的节点来源信息挂到本轮 metadata，并刷新 iterations.json 便于复盘。
-                iteration_data.metadata["node_sources"] = stage1_node_sources
-                iteration_summaries[-1]["node_sources"] = stage1_node_sources
-                with iterations_path.open("w", encoding="utf-8") as f:
-                    json.dump(iteration_summaries, f, ensure_ascii=False, indent=2)
+                final_evolved_query = QueryData(
+                    query_id=str(uuid.uuid4()),
+                    content=query_next,
+                    metadata={
+                        **(current_query.metadata or {}),
+                        "from_evolution_id": evolution.evolution_id,
+                        "from_iteration_id": iteration_id,
+                        "query_fuzzified": query_fuzzified_next,
+                        "leaf_queries": leaf_queries_next,
+                    },
+                )
 
                 current_mermaid_depth = mermaid.depth() if mermaid else None
                 next_mermaid_depth = mermaid_next.depth() if mermaid_next else None
@@ -357,22 +387,24 @@ class ComplexityExplorationV2:
                     logger.info(f"Query {seed_query.query_id} 收敛，原因: {reason}")
                     evolution.converged = True
                     evolution.convergence_reason = reason
+                    # 最后一轮 reviser 产出未再跑 pipeline，单独落盘供复盘
+                    iteration_summaries.append(
+                        self._build_iteration_summary(
+                            iteration_id + 1,
+                            query_next,
+                            query_fuzzified_next,
+                            mermaid_next,
+                            rubric_next,
+                            pipeline_ran=False,
+                        )
+                    )
+                    self._write_iteration_summaries(iterations_path, iteration_summaries)
                     break
                 
                 # 10. 准备下一轮：更新 (mermaid, query, rubric)
                 mermaid = mermaid_next
                 rubric = rubric_next
-                current_query = QueryData(
-                    query_id=str(uuid.uuid4()),
-                    content=query_next,
-                    metadata={
-                        **(current_query.metadata or {}),
-                        "from_evolution_id": evolution.evolution_id,
-                        "from_iteration_id": iteration_id,
-                        "query_fuzzified": query_fuzzified_next,
-                        "leaf_queries": leaf_queries_next,
-                    },
-                )
+                current_query = final_evolved_query
                 
             except Exception as e:
                 logger.error(f"迭代 {iteration_id + 1} 失败: {e}", exc_info=True)
@@ -382,9 +414,10 @@ class ComplexityExplorationV2:
         
         # 设置最终结果
         evolution.total_iterations = len(evolution.iterations)
-        if evolution.iterations:
-            last_iteration = evolution.iterations[-1]
-            evolution.final_query = last_iteration.query
+        if final_evolved_query is not None:
+            evolution.final_query = final_evolved_query
+        elif evolution.iterations:
+            evolution.final_query = evolution.iterations[-1].query
         
         logger.info(f"Query {seed_query.query_id} 探索完成，共 {evolution.total_iterations} 次迭代")
         
@@ -505,7 +538,7 @@ class ComplexityExplorationV2:
     def _max_consecutive_reasoning_chain(self, mermaid: Mermaid) -> int:
         """
         计算 DAG 中“连续推理性节点”最长链长度。
-        推理节点判定：节点 label 中包含“推理性”。
+        推理节点判定：优先使用 mermaid.nodes 中的 node_type；兼容旧图时回退到 label 含“推理性”。
         """
         flow = mermaid.to_flowchart()
         if not flow.edges:
@@ -524,11 +557,15 @@ class ComplexityExplorationV2:
             adj[edge.src].append(edge.dst)
             indeg[edge.dst] += 1
 
+        node_types = {node.node_id: node.node_type for node in mermaid.nodes}
         labels = mermaid.node_labels()
 
         def is_reasoning(node_id: str) -> bool:
+            node_type = node_types.get(node_id)
+            if node_type:
+                return is_reasoning_node_type(node_type)
             label = labels.get(node_id, "")
-            return "推理性" in label
+            return "推理性" in label or "reasoning" in label.lower()
 
         # 拓扑 DP：dp[n] 表示“以 n 结尾”的最长连续推理链长度。
         dp: Dict[str, int] = {node_id: (1 if is_reasoning(node_id) else 0) for node_id in nodes}

@@ -26,7 +26,7 @@ openai_api:
   default_max_tokens: 64000
 
 multi_turn:
-  max_turns: 20
+  max_turns: 40
   format: "hermes"
   completion_callback: "deep_research.synthesis.core.dr_synthesis_completion_callback.DrSynthesisCompletionCallback"
   tool_config_path: "deep_research/config/tool_config/normal.yaml"
@@ -66,7 +66,7 @@ reward_function:
     api_key: null
     model_name: "qwen3.7-max"
     temperature: 0.0
-    language: "en"
+    language: "cn"
     max_concurrency: 32
     show_progress: true
     rubrics_only: true
@@ -77,7 +77,8 @@ quality_control:
   quality_threshold: 0.0
 
 complexity_exploration:
-  max_iterations: 15
+  language: "en"  # cn | en — switches prompt templates only
+  max_iterations: 10
   reviser:
     model_name: null
     api_key: null

@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 
 
-def get_original_prompt(uid: str, query: str) -> str:
+def get_original_prompt(query: str) -> str:
     """
     General-purpose "search + synthesis" agent system prompt.
 
-    Convention: TrajectoryGenerator calls get_original_prompt(uid, query)
+    Convention: TrajectoryGenerator calls get_original_prompt(query)
     and uses the returned string as the system message.
     """
     current_time = datetime.now().strftime("%Y-%m-%d")
@@ -52,9 +52,6 @@ def get_original_prompt(uid: str, query: str) -> str:
 # Safety and compliance
 - Comply with laws and regulations of mainland China and public order and good customs.
 - For high-risk domains such as medical / legal / investment: provide information and risk notes; do not replace professionals; do not fabricate conclusions.
-
-# User unique identifier (uid)
-- {uid}
 
 # Current question (query)
 - {query}

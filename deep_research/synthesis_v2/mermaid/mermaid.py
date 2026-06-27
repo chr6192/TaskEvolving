@@ -161,8 +161,33 @@ class Mermaid:
     def node_dicts(self) -> list[dict[str, Any]]:
         return [node.to_dict() for node in self.nodes]
 
+    def _structure_lines(self) -> list[str]:
+        return [ln.strip() for ln in (self.structure or "").splitlines() if ln.strip()]
+
+    def _structure_node_ids(self) -> set[str]:
+        """从 structure 行（含无边独立节点）与 nodes 元数据收集节点 ID。"""
+        node_ids: set[str] = set()
+        for ln in self._structure_lines():
+            if ln.lower().startswith("flowchart"):
+                continue
+            if "-->" in ln:
+                parts = [part.strip() for part in re.split(r"\s*-->\s*", ln) if part.strip()]
+                for part in parts:
+                    node_id, _ = self._extract_node_id_and_label(part)
+                    if node_id:
+                        node_ids.add(node_id)
+            else:
+                node_id, _ = self._extract_node_id_and_label(ln)
+                if node_id:
+                    node_ids.add(node_id)
+        if not node_ids:
+            for node in self.nodes:
+                if node.node_id:
+                    node_ids.add(node.node_id)
+        return node_ids
+
     def to_flowchart(self) -> MermaidFlowchart:
-        lines = [ln.strip() for ln in (self.structure or "").splitlines() if ln.strip()]
+        lines = self._structure_lines()
         if not lines:
             return MermaidFlowchart()
 
@@ -175,21 +200,22 @@ class Mermaid:
 
         edges: list[MermaidEdge] = []
         for ln in lines:
-            if "-->" not in ln:
+            if ln.lower().startswith("flowchart") or "-->" not in ln:
                 continue
-            left, right = ln.split("-->", 1)
-            src, src_label = self._extract_node_id_and_label(left)
-            dst, dst_label = self._extract_node_id_and_label(right)
-            if not src or not dst:
-                continue
-            edges.append(
-                MermaidEdge(
-                    src=src,
-                    dst=dst,
-                    src_label=src_label,
-                    dst_label=dst_label,
+            parts = [part.strip() for part in re.split(r"\s*-->\s*", ln) if part.strip()]
+            for idx in range(len(parts) - 1):
+                src, src_label = self._extract_node_id_and_label(parts[idx])
+                dst, dst_label = self._extract_node_id_and_label(parts[idx + 1])
+                if not src or not dst:
+                    continue
+                edges.append(
+                    MermaidEdge(
+                        src=src,
+                        dst=dst,
+                        src_label=src_label,
+                        dst_label=dst_label,
+                    )
                 )
-            )
 
         return MermaidFlowchart(direction=direction, edges=edges)
 
@@ -232,7 +258,8 @@ class Mermaid:
     def depth(self) -> Optional[int]:
         flow = self.to_flowchart()
         if not flow.edges:
-            return None
+            # 合法单节点（或无边多节点）图深度为 1，与有边时 dist 初值一致
+            return 1 if self._structure_node_ids() else None
 
         nodes: set[str] = set()
         for e in flow.edges:
@@ -268,7 +295,7 @@ class Mermaid:
         """返回 DAG 中所有叶子节点（出度为 0）的 ID 列表。"""
         flow = self.to_flowchart()
         if not flow.edges:
-            return []
+            return sorted(self._structure_node_ids())
 
         all_nodes: set[str] = set()
         has_outgoing: set[str] = set()
@@ -312,7 +339,22 @@ class Mermaid:
 
         flow = self.to_flowchart()
         results: list[tuple[str, Mermaid]] = []
+        labels = self.node_labels()
         for leaf in leaves:
+            if not flow.edges:
+                label = labels.get(leaf, "")
+                structure_lines = [f"flowchart {flow.direction}"]
+                if label:
+                    structure_lines.append(f'{leaf}["{label}"]')
+                else:
+                    structure_lines.append(leaf)
+                sub_nodes = [node for node in self.nodes if node.node_id == leaf]
+                results.append((
+                    leaf,
+                    Mermaid.from_str("\n".join(structure_lines), nodes=sub_nodes),
+                ))
+                continue
+
             ancestor_nodes = self._collect_ancestors(leaf)
             sub_edges = [e for e in flow.edges if e.src in ancestor_nodes and e.dst in ancestor_nodes]
             sub_flow = MermaidFlowchart(direction=flow.direction, edges=sub_edges)
@@ -328,14 +370,21 @@ class Mermaid:
         return results
 
     def node_labels(self) -> dict[str, str]:
-        """返回 {node_id: label} 映射（仅包含有标签的节点）。"""
-        flow = self.to_flowchart()
+        """返回 {node_id: label} 映射（从边上的标签与独立节点行收集）。"""
         labels: dict[str, str] = {}
-        for e in flow.edges:
-            if e.src_label is not None:
-                labels.setdefault(e.src, e.src_label)
-            if e.dst_label is not None:
-                labels.setdefault(e.dst, e.dst_label)
+        for ln in self._structure_lines():
+            if ln.lower().startswith("flowchart"):
+                continue
+            if "-->" in ln:
+                parts = [part.strip() for part in re.split(r"\s*-->\s*", ln) if part.strip()]
+                for part in parts:
+                    node_id, label = self._extract_node_id_and_label(part)
+                    if node_id and label:
+                        labels.setdefault(node_id, label)
+            else:
+                node_id, label = self._extract_node_id_and_label(ln)
+                if node_id and label:
+                    labels.setdefault(node_id, label)
         return labels
 
     def as_system_prompt_injection(self) -> str:

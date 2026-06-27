@@ -1,5 +1,9 @@
 # Synthesis V2 配置文件（精简版）
 # 仅保留当前 synthesis_v2 执行链路中被实际读取的字段
+#
+# API Key 策略（yaml 为 null 时）：
+#   - reward / rubric 评测：DASHSCOPE_API_KEY → OPENAI_API_KEY
+#   - 其余（探索、轨迹生成等）：OPENAI_API_KEY → DASHSCOPE_API_KEY
 
 concurrency:
   max_workers: 32
@@ -12,21 +16,23 @@ writer:
   output_dir: "outputs/synthesis_v2"
 
 openai_api:
-  api_key: null
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  api_key: null # OPENAI_API_KEY（回退 DASHSCOPE_API_KEY）
+  base_url: "https://api.v3.cm/v1/chat/completions"
   timeout: 180
   max_retries: 3
   rate_limit_max_retries: 3
   rate_limit_initial_wait: 10
   rate_limit_max_wait: 120
-  default_model_name: "qwen3.7-max"
+  output_error_max_retries: 3
+  default_model_name: "gpt-5.5"
   default_temperature: 0.7
   default_top_p: 0.9
   default_top_k: null
-  default_max_tokens: 64000
+  default_max_tokens: 100000  # 模型输出（completion）token 上限
+  max_request_input_tokens: 240000  # 整次 API input 上限（实测约 272k token，×0.9 安全余量）
 
 multi_turn:
-  max_turns: 40
+  max_turns: 200
   format: "hermes"
   completion_callback: "deep_research.synthesis.core.dr_synthesis_completion_callback.DrSynthesisCompletionCallback"
   tool_config_path: "deep_research/config/tool_config/normal.yaml"
@@ -36,7 +42,7 @@ query_generation:
   max_queries_per_call: 20
   max_concurrent_generation: 5
   model_name: null
-  api_key: null
+  api_key: null  # OPENAI_API_KEY（回退 DASHSCOPE_API_KEY）
   base_url: null
   temperature: 0.9
   top_p: 0.9
@@ -49,12 +55,12 @@ generation:
   inject_mermaid_in_prompt: false
   max_concurrent_trajectories: 5
   model_name: null
-  api_key: null
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  api_key: null  # OPENAI_API_KEY（回退 DASHSCOPE_API_KEY）
+  base_url: null
   temperature: null
   top_p: null
   top_k: null
-  max_tokens: 65536
+  max_tokens: null
 
 orm:
   enabled: true
@@ -63,7 +69,7 @@ reward_function:
   class_path: "deep_research.reward.openjudge_reward_function.OpenJudgeRewardFunction"
   init_params:
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    api_key: null
+    api_key: null  # DASHSCOPE_API_KEY（回退 OPENAI_API_KEY）
     model_name: "qwen3.7-max"
     temperature: 0.0
     language: "cn"
@@ -77,15 +83,15 @@ quality_control:
   quality_threshold: 0.0
 
 complexity_exploration:
-  language: "en"  # cn | en — switches prompt templates only
+  language: "cn"  # cn | en — switches prompt templates only
   max_iterations: 10
   reviser:
     model_name: null
-    api_key: null
+    api_key: null  # OPENAI_API_KEY（回退 DASHSCOPE_API_KEY）
     base_url: null
     temperature: 0.8
     top_p: null
     top_k: null
-    max_tokens: null
-    mermaid_char_limit: 2000
+    max_tokens: 100000
+    fuzzify_max_attempts: 3
   output_dir: "outputs/complexity_exploration"

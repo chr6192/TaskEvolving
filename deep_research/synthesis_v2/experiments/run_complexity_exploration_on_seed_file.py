@@ -15,6 +15,11 @@
   python deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
     --input deep_research/synthesis_v2/data/nq_ch.jsonl \
     --language cn
+
+  # 断点续跑：对已因 max_iterations_reached 触顶的 case，在调高 max_iterations 后继续
+  python deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
+    --resume \
+    --max-concurrent-seeds 2
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 from omegaconf import OmegaConf
 
@@ -84,11 +89,28 @@ def _already_ran(output_root: Path, query_id: str) -> bool:
     """
     以输出目录是否存在来判断是否已跑过（支持 query_id 与 query_id__N）。
     """
-    base = _safe_dirname(query_id)
-    if (output_root / base).exists():
-        return True
-    # 兼容同名目录冲突时的 __2/__3...
-    return any(output_root.glob(f"{base}__*"))
+    return ComplexityExplorationV2.find_evolution_dir(output_root, query_id) is not None
+
+
+def _resolve_seed_job(
+    output_root: Path,
+    query_id: str,
+    *,
+    resume: bool,
+) -> Tuple[str, Optional[Path]]:
+    """
+    返回 (action, resume_dir)。
+    action: run | resume | skip
+    """
+    evolution_dir = ComplexityExplorationV2.find_evolution_dir(output_root, query_id)
+    if evolution_dir is None:
+        return ("run", None) if not resume else ("skip", None)
+    if not resume:
+        return "skip", None
+    info = ComplexityExplorationV2.inspect_resume(evolution_dir)
+    if info.get("status") == "resumable":
+        return "resume", evolution_dir
+    return "skip", None
 
 
 def _iter_seed_records(path: Path) -> Iterable[QueryData]:
@@ -110,26 +132,34 @@ async def _explore_seed(
     seed_query: QueryData,
     explorer: ComplexityExplorationV2,
     best_of_n: int,
+    resume_dir: Optional[Path],
     semaphore: asyncio.Semaphore,
     stats_lock: asyncio.Lock,
     counters: dict[str, int],
 ) -> None:
     async with semaphore:
-        print(f"\n===== [{job_index}] explore query_id={seed_query.query_id} =====")
+        mode = "resume" if resume_dir is not None else "run"
+        print(f"\n===== [{job_index}] {mode} query_id={seed_query.query_id} =====")
         try:
             evolution = await explorer.explore(
                 seed_query,
                 best_of_n=None if best_of_n <= 1 else best_of_n,
+                resume_dir=resume_dir,
             )
             async with stats_lock:
                 if evolution is None:
                     counters["fail"] += 1
                     print(f"[{job_index}] FAILED: evolution=None")
                 else:
-                    counters["ok"] += 1
+                    key = "resumed" if resume_dir is not None else "ok"
+                    counters[key] += 1
                     converged = getattr(evolution, "converged", None)
                     iters = getattr(evolution, "total_iterations", None)
-                    print(f"[{job_index}] OK: converged={converged} total_iterations={iters}")
+                    reason = getattr(evolution, "convergence_reason", None)
+                    print(
+                        f"[{job_index}] OK: converged={converged} "
+                        f"total_iterations={iters} reason={reason}"
+                    )
         except Exception as e:
             async with stats_lock:
                 counters["fail"] += 1
@@ -144,6 +174,7 @@ async def run(
     api_key: Optional[str],
     language: str,
     max_concurrent_seeds: int,
+    resume: bool,
 ) -> None:
     config_path = Path(__file__).resolve().parents[1] / "config" / "synthesis_v2.yaml"
     config = OmegaConf.load(str(config_path))
@@ -190,9 +221,11 @@ async def run(
     output_root.mkdir(parents=True, exist_ok=True)
     print(f"Using output_root={output_root}")
     print(f"Using max_concurrent_seeds={max_concurrent_seeds}")
+    print(f"Using resume={resume}")
 
-    pending: list[tuple[int, QueryData]] = []
+    pending: list[tuple[int, QueryData, Optional[Path]]] = []
     skipped_prefilter = 0
+    skipped_not_resumable = 0
     total_seen = 0
     for idx, seed_query in enumerate(_iter_seed_records(seed_file), start=0):
         if idx < start:
@@ -200,14 +233,28 @@ async def run(
         total_seen += 1
         if limit is not None and total_seen > limit:
             break
-        if _already_ran(output_root, seed_query.query_id):
+        action, resume_dir = _resolve_seed_job(
+            output_root,
+            seed_query.query_id,
+            resume=resume,
+        )
+        if action == "skip":
             skipped_prefilter += 1
             if skipped_prefilter % 50 == 1:
-                print(f"[skip] already done: {seed_query.query_id} (skipped={skipped_prefilter})")
+                print(f"[skip] existing: {seed_query.query_id} (skipped={skipped_prefilter})")
             continue
-        pending.append((total_seen, seed_query))
+        if action == "resume" and resume_dir is None:
+            skipped_not_resumable += 1
+            continue
+        pending.append((total_seen, seed_query, resume_dir))
 
-    counters = {"ok": 0, "fail": 0, "skipped": skipped_prefilter}
+    counters = {
+        "ok": 0,
+        "resumed": 0,
+        "fail": 0,
+        "skipped": skipped_prefilter,
+        "skipped_not_resumable": skipped_not_resumable,
+    }
     semaphore = asyncio.Semaphore(max(1, max_concurrent_seeds))
     stats_lock = asyncio.Lock()
 
@@ -220,17 +267,19 @@ async def run(
                         seed_query=seed_query,
                         explorer=explorer,
                         best_of_n=best_of_n,
+                        resume_dir=resume_dir,
                         semaphore=semaphore,
                         stats_lock=stats_lock,
                         counters=counters,
                     )
-                    for job_index, seed_query in pending
+                    for job_index, seed_query, resume_dir in pending
                 ]
             )
     finally:
         print(
-            f"\nDone. ok={counters['ok']} fail={counters['fail']} "
-            f"skipped={counters['skipped']} pending={len(pending)}"
+            f"\nDone. ok={counters['ok']} resumed={counters['resumed']} fail={counters['fail']} "
+            f"skipped={counters['skipped']} skipped_not_resumable={counters['skipped_not_resumable']} "
+            f"pending={len(pending)}"
         )
         await reviser.cleanup()
         await workflow.cleanup()
@@ -252,7 +301,7 @@ def main() -> None:
     parser.add_argument(
         "--max-concurrent-seeds",
         type=int,
-        default=3,
+        default=2,
         help="Max number of seeds to explore in parallel (default: 3; set 1 for serial).",
     )
     parser.add_argument("--limit", type=int, default=None, help="Only run N seeds (after --start).")
@@ -260,9 +309,17 @@ def main() -> None:
     parser.add_argument(
         "--language",
         type=str,
-        default="en",
+        default="cn",
         choices=["en", "cn"],
         help="Language switch: prompts, evaluation, and default seed dataset (default: cn).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "断点续跑：对已存在且 exploration_stop.reason=max_iterations_reached 的 case，"
+            "从 iterations.json 中 pending 的下一轮继续（需先把 max_iterations 调高）。"
+        ),
     )
     parser.add_argument(
         "--api-key",
@@ -281,6 +338,7 @@ def main() -> None:
             api_key=args.api_key,
             language=args.language,
             max_concurrent_seeds=args.max_concurrent_seeds,
+            resume=args.resume,
         )
     )
 

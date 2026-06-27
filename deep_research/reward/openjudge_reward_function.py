@@ -5,6 +5,7 @@ This module implements the V0 version of reward computation using
 OpenJudge GradingRunner with financial domain and agent graders.
 """
 
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -34,6 +35,7 @@ from deep_research.reward.openjudge_reward_manager import (
     RewardResult,
     RewardSample,
 )
+from deep_research.synthesis.core.llm_utils import resolve_rubric_api_key
 
 
 class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
@@ -88,12 +90,13 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
                 This is critical for long prompts and large context windows.
             max_retries: Maximum number of retries for API calls (default: 5).
             base_url: OpenAI-compatible API base URL (falls back to OPENAI_BASE_URL env).
-            api_key: API key (falls back to OPENAI_API_KEY env).
+            api_key: API key (falls back to DASHSCOPE_API_KEY, then OPENAI_API_KEY).
             **kwargs: Additional arguments (e.g., show_progress)
         """
+        resolved_api_key = resolve_rubric_api_key(api_key)
         self.model = OpenAIChatModel(
             model=model_name,
-            api_key=api_key,
+            api_key=resolved_api_key,
             base_url=base_url,
             temperature=temperature,
             client_args={
@@ -125,6 +128,10 @@ class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):
         logger.info(f"API timeout: {api_timeout}s")
         logger.info(f"Max retries: {max_retries}")
         logger.info(f"Model: {model_name}, base_url: {base_url or 'env:OPENAI_BASE_URL'}")
+        logger.info(
+            "Rubric API key: %s",
+            "explicit" if api_key else "env:DASHSCOPE_API_KEY or OPENAI_API_KEY",
+        )
     
     def create_grader_configs(
         self,

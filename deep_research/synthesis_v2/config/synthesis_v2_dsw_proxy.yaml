@@ -95,5 +95,4 @@ complexity_exploration:
     top_p: null
     top_k: null
     max_tokens: null
-    mermaid_char_limit: 2000
   output_dir: "outputs/complexity_exploration"

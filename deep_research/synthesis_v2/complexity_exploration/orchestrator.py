@@ -6,6 +6,7 @@ import logging
 import uuid
 import json
 import re
+from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
 from omegaconf import DictConfig
@@ -60,6 +61,9 @@ def _allocate_unique_dir(base_dir):
         i += 1
 
 
+RESUMABLE_STOP_REASONS = frozenset({"max_iterations_reached"})
+
+
 class ComplexityExplorationV2:
     """使用新pipeline的复杂度探索编排器"""
     
@@ -103,25 +107,233 @@ class ComplexityExplorationV2:
         query_fuzzified: Optional[str],
         mermaid: Optional[Mermaid],
         rubric: Optional[dict],
-        *,
-        pipeline_ran: bool = True,
     ) -> dict:
-        summary = {
+        return {
             "iteration_id": iteration_id,
             "query": query,
             "query_fuzzified": query_fuzzified or query,
             "mermaid": mermaid.to_str() if mermaid else None,
             "mermaid_structure": mermaid.to_structure_str() if mermaid else None,
+            "mermaid_nodes": mermaid.node_dicts() if mermaid else [],
+            "depth": mermaid.depth() if mermaid else None,
+            "node_count": len(mermaid.node_dicts()) if mermaid else None,
             "rubric": rubric,
         }
-        if not pipeline_ran:
-            summary["pipeline_ran"] = False
-        return summary
 
     @staticmethod
-    def _write_iteration_summaries(path, summaries: List[dict]) -> None:
+    def _build_exploration_stop_record(
+        evolution: QueryEvolution,
+        *,
+        stop_at_iteration_id: Optional[int] = None,
+    ) -> dict:
+        return {
+            "converged": evolution.converged,
+            "reason": evolution.convergence_reason or "completed",
+            "stop_at_iteration_id": stop_at_iteration_id,
+            "pipeline_iterations_completed": len(evolution.iterations),
+            "evolution_id": evolution.evolution_id,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @staticmethod
+    def _write_iterations_file(
+        path,
+        summaries: List[dict],
+        exploration_stop: Optional[dict] = None,
+    ) -> None:
+        payload: dict = {"iterations": summaries}
+        if exploration_stop is not None:
+            payload["exploration_stop"] = exploration_stop
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _build_reviser_stage1_record(
+        *,
+        iteration_id: int,
+        query: str,
+        mermaid: Optional[Mermaid],
+        stage1_output: Optional[dict],
+        metadata: Optional[dict] = None,
+        error: Optional[str] = None,
+    ) -> dict:
+        record = {
+            "iteration_id": iteration_id,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "input": {
+                "query": query,
+                "mermaid": mermaid.to_str() if mermaid else None,
+                "mermaid_structure": mermaid.to_structure_str() if mermaid else None,
+                "mermaid_nodes": mermaid.node_dicts() if mermaid else [],
+            },
+            "stage1_output": stage1_output,
+            "metadata": metadata or {},
+        }
+        if error:
+            record["error"] = error
+        return record
+
+    @staticmethod
+    def _write_reviser_summaries(path, summaries: List[dict]) -> None:
         with path.open("w", encoding="utf-8") as f:
             json.dump(summaries, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def find_evolution_dir(output_root, query_id: str):
+        """查找 seed 对应的已有探索目录（优先无 __ 后缀）。"""
+        base = _safe_dirname(query_id)
+        direct = output_root / base
+        if direct.is_dir() and (direct / "iterations.json").is_file():
+            return direct
+        for candidate in sorted(output_root.glob(f"{base}__*")):
+            if candidate.is_dir() and (candidate / "iterations.json").is_file():
+                return candidate
+        return None
+
+    @staticmethod
+    def _structure_snapshot(summary: dict) -> tuple[Optional[int], Optional[int]]:
+        depth = summary.get("depth")
+        node_count = summary.get("node_count")
+        if node_count is None:
+            nodes = summary.get("mermaid_nodes")
+            if isinstance(nodes, list):
+                node_count = len(nodes)
+        if isinstance(depth, float):
+            depth = int(depth)
+        return depth, node_count
+
+    @classmethod
+    def _structure_unchanged(cls, newer: dict, older: dict) -> bool:
+        """与 explore 主循环一致：depth 与 node_count 均存在且相等才算结构不变。"""
+        newer_depth, newer_count = cls._structure_snapshot(newer)
+        older_depth, older_count = cls._structure_snapshot(older)
+        if (
+            newer_depth is None
+            or older_depth is None
+            or newer_count is None
+            or older_count is None
+        ):
+            return False
+        return newer_depth == older_depth and newer_count == older_count
+
+    @classmethod
+    def _compute_no_structure_change_streak(cls, summaries: List[dict]) -> int:
+        """
+        从 iterations 汇总回溯连续结构不变轮数。
+        summaries[i+1] vs summaries[i] 对应第 i 轮 reviser 结束时的比较口径。
+        """
+        if len(summaries) < 2:
+            return 0
+        streak = 0
+        for i in range(len(summaries) - 1, 0, -1):
+            if cls._structure_unchanged(summaries[i], summaries[i - 1]):
+                streak += 1
+            else:
+                break
+        return streak
+
+    @staticmethod
+    def _mermaid_from_summary(summary: dict) -> Optional[Mermaid]:
+        mermaid_str = summary.get("mermaid")
+        if not isinstance(mermaid_str, str) or not mermaid_str.strip():
+            return None
+        nodes = summary.get("mermaid_nodes") or []
+        return Mermaid.from_str(mermaid_str, nodes=nodes)
+
+    @staticmethod
+    def _query_from_summary(summary: dict, seed_query: QueryData) -> QueryData:
+        return QueryData(
+            query_id=seed_query.query_id,
+            content=str(summary.get("query") or seed_query.content),
+            metadata={
+                **(seed_query.metadata or {}),
+                "query_fuzzified": summary.get("query_fuzzified") or summary.get("query"),
+            },
+        )
+
+    @classmethod
+    def inspect_resume(cls, evolution_dir) -> dict:
+        """
+        检查目录是否可断点续跑。返回 status/resume_from_iteration_id 等字段。
+        """
+        evolution_dir = Path(evolution_dir)
+        iterations_path = evolution_dir / "iterations.json"
+        if not iterations_path.is_file():
+            return {"status": "missing_iterations", "evolution_dir": str(evolution_dir)}
+
+        payload = json.loads(iterations_path.read_text(encoding="utf-8"))
+        summaries = payload.get("iterations") or []
+        stop = payload.get("exploration_stop") or {}
+        reason = str(stop.get("reason") or "")
+
+        if reason not in RESUMABLE_STOP_REASONS:
+            return {
+                "status": "not_resumable",
+                "evolution_dir": str(evolution_dir),
+                "reason": reason or "unknown",
+            }
+        if not summaries:
+            return {"status": "empty_iterations", "evolution_dir": str(evolution_dir)}
+
+        stop_at = stop.get("stop_at_iteration_id")
+        if not isinstance(stop_at, int):
+            return {"status": "missing_stop_at", "evolution_dir": str(evolution_dir), "reason": reason}
+
+        pending = summaries[-1]
+        pending_id = pending.get("iteration_id")
+        if pending_id != stop_at + 1:
+            return {
+                "status": "unexpected_pending_iteration",
+                "evolution_dir": str(evolution_dir),
+                "reason": reason,
+                "stop_at_iteration_id": stop_at,
+                "pending_iteration_id": pending_id,
+            }
+
+        streak = cls._compute_no_structure_change_streak(summaries)
+
+        return {
+            "status": "resumable",
+            "evolution_dir": str(evolution_dir),
+            "reason": reason,
+            "stop_at_iteration_id": stop_at,
+            "resume_from_iteration_id": pending_id,
+            "no_structure_change_streak": streak,
+            "pipeline_iterations_completed": stop.get("pipeline_iterations_completed"),
+        }
+
+    @classmethod
+    def _load_resume_checkpoint(cls, evolution_dir, seed_query: QueryData) -> dict:
+        info = cls.inspect_resume(evolution_dir)
+        if info.get("status") != "resumable":
+            raise ValueError(
+                f"无法从 {evolution_dir} 续跑: {info.get('status')} ({info.get('reason', '')})"
+            )
+
+        iterations_path = Path(evolution_dir) / "iterations.json"
+        payload = json.loads(iterations_path.read_text(encoding="utf-8"))
+        summaries = list(payload.get("iterations") or [])
+        stop = payload.get("exploration_stop") or {}
+        pending = summaries.pop()
+
+        reviser_path = Path(evolution_dir) / "reviser.json"
+        reviser_summaries: List[dict] = []
+        if reviser_path.is_file():
+            raw = json.loads(reviser_path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                reviser_summaries = raw
+
+        return {
+            "evolution_id": str(stop.get("evolution_id") or uuid.uuid4()),
+            "start_iteration_id": int(pending["iteration_id"]),
+            "current_query": cls._query_from_summary(pending, seed_query),
+            "mermaid": cls._mermaid_from_summary(pending),
+            "rubric": pending.get("rubric"),
+            "iteration_summaries": summaries,
+            "reviser_summaries": reviser_summaries,
+            "no_structure_change_streak": int(info.get("no_structure_change_streak") or 0),
+            "stop_reason": str(stop.get("reason") or ""),
+        }
     
     def _review_expand_task_output(
         self,
@@ -140,6 +352,8 @@ class ComplexityExplorationV2:
         self,
         seed_query: QueryData,
         best_of_n: Optional[int] = None,
+        *,
+        resume_dir: Optional[Path] = None,
     ) -> Optional[QueryEvolution]:
         """
         探索单个query的复杂度演化
@@ -147,11 +361,23 @@ class ComplexityExplorationV2:
         Args:
             seed_query: 种子query
             best_of_n: 覆盖 best-of-n 采样数（每轮 iteration 内部使用；<=1 等价不启用）
+            resume_dir: 若指定，从该目录的 iterations.json 断点续跑（仅支持
+                exploration_stop.reason == max_iterations_reached）
             
         Returns:
             演化过程（包含所有迭代）
         """
-        logger.info(f"开始复杂度探索: {seed_query.query_id}")
+        resume_checkpoint = None
+        if resume_dir is not None:
+            resume_checkpoint = self._load_resume_checkpoint(Path(resume_dir), seed_query)
+            logger.info(
+                "断点续跑 %s: 从 iteration_id=%s 继续（此前因 %s 停止）",
+                seed_query.query_id,
+                resume_checkpoint["start_iteration_id"],
+                resume_checkpoint["stop_reason"],
+            )
+        else:
+            logger.info(f"开始复杂度探索: {seed_query.query_id}")
 
         effective_best_of_n = (
             self.default_best_of_n if best_of_n is None else int(best_of_n)
@@ -169,24 +395,39 @@ class ComplexityExplorationV2:
                 writer=None,
             )
         
-        evolution = QueryEvolution(
-            evolution_id=str(uuid.uuid4()),
-            original_query=seed_query,
-            iterations=[],
-            metadata={"start_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        )
-        
-        current_query = seed_query
-        mermaid: Optional[Mermaid] = None
-        rubric: Optional[dict] = None
+        if resume_checkpoint is not None:
+            evolution = QueryEvolution(
+                evolution_id=resume_checkpoint["evolution_id"],
+                original_query=seed_query,
+                iterations=[],
+                metadata={
+                    "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "resumed_from": resume_checkpoint["stop_reason"],
+                    "resume_from_iteration_id": resume_checkpoint["start_iteration_id"],
+                },
+            )
+            current_query = resume_checkpoint["current_query"]
+            mermaid = resume_checkpoint["mermaid"]
+            rubric = resume_checkpoint["rubric"]
+            evolution_dir = Path(resume_dir).resolve()
+        else:
+            evolution = QueryEvolution(
+                evolution_id=str(uuid.uuid4()),
+                original_query=seed_query,
+                iterations=[],
+                metadata={"start_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            )
+            current_query = seed_query
+            mermaid = None
+            rubric = None
 
-        output_root = resolve_under_repo(
-            self.exploration_config.get("output_dir", "outputs/complexity_exploration"),
-            anchor_file=__file__,
-        )
-        # 目录用 query_id 命名，便于断点续跑/人工检索；若冲突则自动加后缀避免覆盖
-        evolution_dir = _allocate_unique_dir(output_root / _safe_dirname(seed_query.query_id))
-        evolution_dir.mkdir(parents=True, exist_ok=True)
+            output_root = resolve_under_repo(
+                self.exploration_config.get("output_dir", "outputs/complexity_exploration"),
+                anchor_file=__file__,
+            )
+            # 目录用 query_id 命名，便于断点续跑/人工检索；若冲突则自动加后缀避免覆盖
+            evolution_dir = _allocate_unique_dir(output_root / _safe_dirname(seed_query.query_id))
+            evolution_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"ComplexityExplorationV2 落盘目录: {evolution_dir.resolve()}")
 
         # 如果启用 best-of-n，让 BatchProcessor 也把 selected/rejected 落盘到 pipeline_results.jsonl 系列文件
@@ -197,10 +438,45 @@ class ComplexityExplorationV2:
 
         # 汇总文件 iterations.json：每轮记录 pipeline 实际使用的 query / mermaid / rubric
         iterations_path = evolution_dir / "iterations.json"
-        iteration_summaries: List[dict] = []
-        no_depth_growth_streak = 0
+        iteration_summaries: List[dict] = (
+            list(resume_checkpoint["iteration_summaries"]) if resume_checkpoint else []
+        )
+        reviser_path = evolution_dir / "reviser.json"
+        reviser_summaries: List[dict] = (
+            list(resume_checkpoint["reviser_summaries"]) if resume_checkpoint else []
+        )
+        no_structure_change_streak = (
+            int(resume_checkpoint["no_structure_change_streak"]) if resume_checkpoint else 0
+        )
         final_evolved_query: Optional[QueryData] = None
-        for iteration_id in range(self.max_iterations):
+        stop_at_iteration_id: Optional[int] = None
+        start_iteration_id = (
+            int(resume_checkpoint["start_iteration_id"]) if resume_checkpoint else 0
+        )
+
+        if start_iteration_id >= self.max_iterations:
+            logger.warning(
+                "Query %s 续跑起点 iteration_id=%s 已 >= max_iterations=%s，跳过",
+                seed_query.query_id,
+                start_iteration_id,
+                self.max_iterations,
+            )
+            evolution.converged = True
+            evolution.convergence_reason = "resume_start_beyond_max_iterations"
+            evolution.total_iterations = len(iteration_summaries)
+            return evolution
+
+        def _finalize_iterations_file() -> None:
+            self._write_iterations_file(
+                iterations_path,
+                iteration_summaries,
+                self._build_exploration_stop_record(
+                    evolution,
+                    stop_at_iteration_id=stop_at_iteration_id,
+                ),
+            )
+
+        for iteration_id in range(start_iteration_id, self.max_iterations):
             logger.info(
                 f"Query {seed_query.query_id} - 迭代 {iteration_id + 1}/{self.max_iterations} "
                 f"(evolution_id={evolution.evolution_id})"
@@ -236,6 +512,8 @@ class ComplexityExplorationV2:
                         logger.warning(f"迭代 {iteration_id + 1} best-of-n 选优为空")
                         evolution.converged = True
                         evolution.convergence_reason = "best_of_n_empty"
+                        stop_at_iteration_id = iteration_id
+                        _finalize_iterations_file()
                         break
                     # selected_results 理论上只包含 1 条（因为只有 1 个原始 input）
                     result = selected_results[0]
@@ -247,6 +525,8 @@ class ComplexityExplorationV2:
                     logger.warning(f"迭代 {iteration_id + 1} pipeline失败")
                     evolution.converged = True
                     evolution.convergence_reason = "pipeline_failed"
+                    stop_at_iteration_id = iteration_id
+                    _finalize_iterations_file()
                     break
                 
                 # 3. 计算质量分数 & 准备 evaluation_output
@@ -311,45 +591,72 @@ class ComplexityExplorationV2:
                         rubric,
                     )
                 )
-                self._write_iteration_summaries(iterations_path, iteration_summaries)
+                self._write_iterations_file(iterations_path, iteration_summaries)
 
-                # 8. 调用 reviser：stage1 生成 mermaid+query，stage2 基于 stage1 query 生成 query_fuzzified+rubric
+                # 8. 调用 reviser：stage1 接收 query+mermaid+trajectory 输出 mermaid+rubric；
+                #    stage2 接收新 mermaid+trajectory 输出 query+query_fuzzified
                 reviser_metadata = {
                     "iteration_id": iteration_id,
                     "evolution_id": evolution.evolution_id,
                     "evaluation_output": evaluation_output,
                 }
-                revise_stage1_out = await self.reviser.expand_task(
-                    mermaid=mermaid.to_str() if mermaid else None,
-                    traj_k=traj_k,
-                    metadata=reviser_metadata,
-                )
+                try:
+                    revise_stage1_out = await self.reviser.expand_task(
+                        query=current_query.content,
+                        mermaid=mermaid.to_str() if mermaid else None,
+                        traj_k=traj_k,
+                        metadata=reviser_metadata,
+                    )
+                except Exception as e:
+                    partial_output = getattr(e, "partial_output", None)
+                    reviser_summaries.append(
+                        self._build_reviser_stage1_record(
+                            iteration_id=iteration_id,
+                            query=current_query.content,
+                            mermaid=mermaid,
+                            stage1_output=partial_output,
+                            metadata=reviser_metadata,
+                            error=str(e),
+                        )
+                    )
+                    self._write_reviser_summaries(reviser_path, reviser_summaries)
+                    raise
                 revise_stage1_out = self._review_expand_task_output(
                     stage1_out=revise_stage1_out,
                     iteration_id=iteration_id,
                     traj_k=traj_k,
                 )
+                reviser_summaries.append(
+                    self._build_reviser_stage1_record(
+                        iteration_id=iteration_id,
+                        query=current_query.content,
+                        mermaid=mermaid,
+                        stage1_output=revise_stage1_out,
+                        metadata=reviser_metadata,
+                    )
+                )
+                self._write_reviser_summaries(reviser_path, reviser_summaries)
                 try:
                     revise_stage2_out = await self.reviser.generate_query_and_rubric(
                         stage1_out=revise_stage1_out,
+                        traj_k=traj_k,
                         metadata=reviser_metadata,
                     )
                 except Exception as e:
                     logger.warning(
-                        "迭代 %s query/rubric 生成失败: %s",
+                        "迭代 %s query 生成失败: %s",
                         iteration_id + 1,
                         e,
                     )
                     raise
                 stage1_mermaid_nodes = revise_stage1_out.get("mermaid_nodes", [])
-                stage1_query = revise_stage1_out.get("query", "")
                 mermaid_next = Mermaid.from_str(
                     revise_stage1_out["mermaid"] or "",
                     nodes=stage1_mermaid_nodes,
                 )
-                # stage1+stage2 都完成后赋值：下一轮 query 来自 stage1，rubric/query_fuzzified 来自 stage2
-                query_next = stage1_query
-                rubric_next = revise_stage2_out["rubric"]
+                # stage1+stage2 都完成后赋值：下一轮 mermaid/rubric 来自 stage1，query/query_fuzzified 来自 stage2
+                query_next = revise_stage2_out.get("query", "")
+                rubric_next = revise_stage1_out["rubric"]
                 query_fuzzified_next = revise_stage2_out["query_fuzzified"]
                 leaf_queries_next: List[dict] = []
                 final_evolved_query = QueryData(
@@ -366,21 +673,30 @@ class ComplexityExplorationV2:
 
                 current_mermaid_depth = mermaid.depth() if mermaid else None
                 next_mermaid_depth = mermaid_next.depth() if mermaid_next else None
+                current_mermaid_node_count = (
+                    len(mermaid.node_dicts()) if mermaid else None
+                )
+                next_mermaid_node_count = (
+                    len(mermaid_next.node_dicts()) if mermaid_next else None
+                )
                 if (
                     next_mermaid_depth is not None
                     and current_mermaid_depth is not None
-                    and next_mermaid_depth <= current_mermaid_depth
+                    and next_mermaid_node_count is not None
+                    and current_mermaid_node_count is not None
+                    and next_mermaid_depth == current_mermaid_depth
+                    and next_mermaid_node_count == current_mermaid_node_count
                 ):
-                    no_depth_growth_streak += 1
+                    no_structure_change_streak += 1
                 else:
-                    no_depth_growth_streak = 0
+                    no_structure_change_streak = 0
                 
                 # 9. 判断是否继续
                 should_continue, reason = self._should_continue_exploration(
                     iteration_id=iteration_id,
                     current_mermaid=mermaid,
                     next_mermaid=mermaid_next,
-                    no_depth_growth_streak=no_depth_growth_streak,
+                    no_structure_change_streak=no_structure_change_streak,
                 )
                 
                 if not should_continue:
@@ -395,10 +711,10 @@ class ComplexityExplorationV2:
                             query_fuzzified_next,
                             mermaid_next,
                             rubric_next,
-                            pipeline_ran=False,
                         )
                     )
-                    self._write_iteration_summaries(iterations_path, iteration_summaries)
+                    stop_at_iteration_id = iteration_id
+                    _finalize_iterations_file()
                     break
                 
                 # 10. 准备下一轮：更新 (mermaid, query, rubric)
@@ -410,10 +726,14 @@ class ComplexityExplorationV2:
                 logger.error(f"迭代 {iteration_id + 1} 失败: {e}", exc_info=True)
                 evolution.converged = True
                 evolution.convergence_reason = f"error: {str(e)}"
+                stop_at_iteration_id = iteration_id
+                _finalize_iterations_file()
                 break
         
         # 设置最终结果
         evolution.total_iterations = len(evolution.iterations)
+        if stop_at_iteration_id is None:
+            _finalize_iterations_file()
         if final_evolved_query is not None:
             evolution.final_query = final_evolved_query
         elif evolution.iterations:
@@ -470,7 +790,7 @@ class ComplexityExplorationV2:
         iteration_id: int,
         current_mermaid: Optional[Mermaid],
         next_mermaid: Optional[Mermaid],
-        no_depth_growth_streak: int,
+        no_structure_change_streak: int,
     ) -> tuple[bool, str]:
         """
         判断是否应该继续探索
@@ -478,25 +798,30 @@ class ComplexityExplorationV2:
         Returns:
             (should_continue, reason)
         """
-        # 检查迭代次数
-        if iteration_id >= self.max_iterations - 1:
-            return False, "max_iterations_reached"
-
-
-        # 按“深度是否增长”判断收敛
+        # 按“深度与节点数是否都不变”判断收敛
         current_mermaid_depth = current_mermaid.depth() if current_mermaid else None
         next_mermaid_depth = next_mermaid.depth() if next_mermaid else None
-        # - next 深度缺失：视为无法继续有效增长
-        # - current 有值且 next <= current：深度不再增长（或退化）
+        current_mermaid_node_count = (
+            len(current_mermaid.node_dicts()) if current_mermaid else None
+        )
+        next_mermaid_node_count = (
+            len(next_mermaid.node_dicts()) if next_mermaid else None
+        )
+        # - next 深度或节点数缺失：视为无法继续有效增长
+        # - 深度与节点数均不变：计入 no_structure_change_streak
 
         logger.info(
-            "迭代 %s mermaid深度: current=%s, next=%s",
+            "迭代 %s mermaid: depth current=%s next=%s, node_count current=%s next=%s",
             iteration_id + 1,
             current_mermaid_depth,
             next_mermaid_depth,
+            current_mermaid_node_count,
+            next_mermaid_node_count,
         )
         if next_mermaid_depth is None:
             return False, "mermaid_depth_unavailable"
+        if next_mermaid_node_count is None:
+            return False, "mermaid_node_count_unavailable"
 
         # 连续推理节点链过长时停止（防止“单条推理节点无限延伸”）。
         if self.max_consecutive_reasoning_nodes > 0 and next_mermaid:
@@ -514,12 +839,16 @@ class ComplexityExplorationV2:
                     f"_{max_reasoning_streak}_gt_{self.max_consecutive_reasoning_nodes}",
                 )
 
-        if no_depth_growth_streak >= 2:
+        # 结构收敛优先于 max_iterations，避免最后一轮同时满足两条件时误报轮次上限。
+        if no_structure_change_streak >= 2:
             return (
                 False,
-                "mermaid_depth_not_increasing_for_2_rounds"
-                f"_{current_mermaid_depth}_to_{next_mermaid_depth}",
+                "mermaid_depth_and_node_count_unchanged_for_2_rounds"
+                f"_depth_{current_mermaid_depth}_nodes_{current_mermaid_node_count}",
             )
+
+        if iteration_id >= self.max_iterations - 1:
+            return False, "max_iterations_reached"
         
         # # 检查质量分数阈值
         # if quality_score < self.quality_threshold:

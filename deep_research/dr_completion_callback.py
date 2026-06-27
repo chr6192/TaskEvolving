@@ -23,6 +23,7 @@ from verl.tools.base_tool import initialize_tools_from_config
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.workers.rollout.chat_scheduler import CompletionCallback
+from deep_research.synthesis.core.llm_utils import parse_tool_call_arguments
 
 logger = logging.getLogger(__file__)
 
@@ -70,7 +71,7 @@ class DrCompletionCallback(CompletionCallback):
     async def _call_tool(self, tool_call) -> Dict[str, str]:
         """Call tool and return tool response."""
         tool_name = tool_call.function.name
-        tool_args = json.loads(tool_call.function.arguments)
+        tool_args = parse_tool_call_arguments(tool_call.function.arguments)
         tool = self.tools[tool_name]
 
         instance_id = await tool.create()

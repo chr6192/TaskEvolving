@@ -2,9 +2,9 @@
 Reviser stage-1 (expand task) prompt builder — English version.
 
 Stage 1 goals:
-- Expand the task mermaid from the trajectory;
-- Generate the next-round expanded `query` from the expanded mermaid;
-- `query_fuzzified` and rubric are produced in stage 2 from the stage-1 query.
+- Take query, mermaid, and trajectory; supplement the mermaid;
+- Output mermaid and rubric aligned with the query's final goal;
+- Next-round `query` and `query_fuzzified` are produced in stage 2.
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ from typing import Any, Dict, Optional
 
 def build_revise_expand_task_prompt(
     *,
+    query: str,
     mermaid_k: Optional[str],
-    mermaid_nodes: Optional[list[Dict[str, Any]]] = None,
     traj_k: Dict[str, Any],
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     metadata = metadata or {}
     _ = metadata
-    _ = mermaid_nodes
+    query = (query or "").strip()
     traj_k_str = json.dumps(traj_k, ensure_ascii=False, indent=2)
     mermaid_block = (mermaid_k or "").strip()
     if mermaid_block:
@@ -31,8 +31,8 @@ def build_revise_expand_task_prompt(
     else:
         mermaid_section = "- Previous-round mermaid: (empty — build a new one from the trajectory this round)"
 
-    prompt = f"""You are an assistant that expands the search scope and depth of deep-research tasks based on a trajectory, in order to construct more valuable tasks.
-You must return a `mermaid` object and a `query`.
+    prompt = f"""You are an assistant that expands the search scope and depth of deep-research tasks based on query, trajectory, and an existing mermaid, in order to construct more valuable tasks.
+You must return a `mermaid` object and a `rubric`.
 
 Definitions:
 - `mermaid` describes the full execution process of a deep-research task (NOT a depiction of the trajectory itself). It includes:
@@ -54,7 +54,6 @@ Definitions:
       - if `previous_mermaid`, write `from_previous_mermaid` plus the inheritance basis.
       - if `tool_call_response`, write `tool_call_id=<id>` plus tool name/keywords and key evidence.
       - if `query_or_reason_or_answer`, specify fragment location (e.g. `query` / `reason` / `final_answer`) plus key evidence.
-- `query`: a task question generated from the mermaid.
 
 ## Mermaid requirements
 - Node granularity: whether Factual or Reasoning, one node corresponds to at most a single operation — e.g. one object searched in one tool call, or one analytic question addressed in one reasoning step. Do not merge multiple operations into one node. There is no limit on node count; be as complete as possible, without fabrication or omission.
@@ -85,6 +84,9 @@ Definitions:
 
 ## Known inputs
 
+- Current query (the task question actually used by the pipeline this round; mermaid and rubric must align with its final goal):
+{query}
+
 {mermaid_section}
 
 - Structured representation of the tool-call trajectory (structure and main content shown as-is):
@@ -93,7 +95,7 @@ Definitions:
 # Your workflow
 1. If the previous-round mermaid is empty, first extract key nodes and logical relations from the trajectory, and generate a `mermaid` object that satisfies all requirements above; if not empty, skip this step and proceed directly to revise and expand the existing full mermaid.
 
-2. Revise mermaid. Based on the user question in the trajectory, **delete nodes in the existing mermaid that are irrelevant to that user question**. Keep only the minimal sufficient nodes needed to complete the task; synchronously update mermaid structure and node information (especially check_points — delete entries irrelevant to the final question) so that all nodes directly or indirectly serve the final question. Then reorganize the mermaid so nodes and logic are more reasonable and clear.
+2. Revise mermaid. Based on the given query, **delete nodes in the existing mermaid that are irrelevant to the query's final goal**. Keep only the minimal sufficient nodes needed to complete the task; synchronously update mermaid structure and node information (especially check_points — delete entries irrelevant to the final question) so that all nodes directly or indirectly serve the query's final goal. Then reorganize the mermaid so nodes and logic are more reasonable and clear.
 
 3. Expand mermaid. Analyze information present in the trajectory but not yet written into the mermaid (do not re-add node information deleted in step 2), and produce a more complex mermaid:
   - Prefer depth expansion on the main path: make the whole task harder in depth, i.e. lengthen the path required to solve it. When extending vertically, prefer extending forward or backward rather than inserting middle nodes. The task after depth expansion may differ from before; focus on "small-step deepening" of one topic mentioned in the trajectory but not yet deep in the mermaid. You may change the overall task or existing nodes to achieve a more complex task, but forbid whole-graph rewrites. If the overall task changes, adjust the mermaid according to the expanded task and revise existing nodes and logic to preserve overall logical reasonableness and consistency. Add at most 2 depth nodes per round.
@@ -105,38 +107,36 @@ Definitions:
     - At the end of each expansion round, check whether the expanded mermaid satisfies mermaid format and content requirements; repair if not.
     - Grounding is the first principle: the trajectory may contain hallucinations, so do not put information not obtained via retrieval in `tool_response` into Factual nodes. If new information conflicts with existing mermaid nodes or check_points, verify twice; otherwise, prefer omitting the node rather than blindly adding it.
 
-4. Generate a new `query` from the expanded full mermaid:
-  - Fuzzification: generate a fuzzified question for the full mermaid task — omit concrete reasoning paths and detailed information, keeping only the core problem to solve. The query should steer the answerer along the expanded mermaid direction, but must not restate mermaid node labels, edges, step order, or solution modules, avoiding translating the reasoning path into a directly copyable operation checklist.
-    - Must be a single-task expression: keep only 1 main goal + at most 10 key constraints. Do not develop multiple independent questions in parallel. You may include 1–3 logically linked questions (progressive, deepening, synthetic), but not a set of mutually independent (or weakly related) questions. Use constraints to prevent the question from being too open-ended and to steer the answerer along the mermaid direction.
-    - State broadly which aspects to address and what task to solve; remove redundant, overly specific, factual wording:
-      - Avoid checkpoint-level specifics: for node A[query the strait between Madagascar and mainland Africa] with checkpoint ["The strait between Madagascar and mainland Africa is the Mozambique Channel"], do not ask "What are the spatial scale and natural characteristics of the Mozambique Channel?" — ask "What are the characteristics of the strait between Madagascar and mainland Africa?"
-      - Hide concrete examples: rewrite "Compare Luna 9 (99kg landing mass, no ascent stage), Surveyor 1 (one-way engineering verification) and Luna 15 (crashed during Apollo 11 stay) on technical parameters and mission outcomes" as "Compare prior lunar mission technology and outcomes".
-      - Hide decorative adjectives: rewrite "How can its follower count form an order-of-magnitude gap over other top users?" as "How can its follower count form a large gap over other top users?"
-      - Hide depth information; use simple, easy-to-understand words: rewrite "Please synthesize recommendation algorithm weighting, structural privileges in non-content distribution, and audience reconstruction from content change during government tenure" as "Please analyze from recommendation mechanisms, structural privileges, and content change".
-    - Without over-loosening constraints, rewrite in language close to ordinary users: do not preset conclusions in the query (e.g. specifying a shop must be high-risk) or preset fixed scores/thresholds (e.g. "2.4 points", ">8 points"). Remove specific terminology, formal tone, and professional methods; avoid academic phrasing such as "temporal coupling / dynamic calibration / cross-modal / semantic discrimination / tiered verification logic / final adjudication criteria"; use plain, simple, everyday language that is directly understandable.
-    - Mermaid-invisible: the query must be independent of mermaid and trajectory, and is used to test whether a model can answer the task depicted by the mermaid. Therefore the query must not use referential phrasing such as "based on prior output / as above / as stated / previous section / previous round / final version / continue last time / according to node A".
+4. Based on the expanded full mermaid and the given query, generate `rubric`: one criterion for each node in the mermaid to judge answer quality.
 
-  - Guiding question: on top of fuzzifying the mermaid into a question, also guide the agent toward tasks mentioned in the mermaid (must be existing nodes, not invented tasks) that have not yet been deeply explored, in order to generate a more difficult task that is concrete, reasonable, and meaningful.
-    - Meaningful questions: prefer "evidence-constrained deep analysis" — such as attribution, explanation, conditional constraints, comparison, etc. — requiring conclusions supportable by checkable evidence already in the mermaid. Including but not limited to:
-      - Ask the agent to explain / verify / deepen a node
-      - Ask the agent to synthesize / reason / compare across several nodes
-    - Meaningless questions forbidden:
-      - Cross-checking the same fact with multiple pieces of evidence: "repeatedly verify / compare the same fact across multiple searches/databases and give prioritization rules / confirm via multiple aspects" is a shallow task and meaningless.
-      - Over-autonomous questions that do not depend on evidence or reasoning: "design methodology / design system / design mechanism / build framework / output manual" and similar abstract product-oriented tasks are over-autonomous and meaningless.
+Each criterion includes multiple verifiable checkpoints with the following fields:
+- `node_id`: must match the corresponding `node_id` in `mermaid.nodes` **exactly** (case-sensitive). E.g. if the structure node is `A`, write `"A"`; do not use aliases like `node_a`.
+- `description`: use the action+object text of that node in structure to explain what is being judged.
+- `check_points`: reuse that node's `check_points` from mermaid.nodes; you may lightly adjust wording but must not invent new facts; used to explain how to judge.
 
-  Special note: **If there are no nodes left to deepen, or the question is already deep enough, and further guiding would become multiple parallel independent questions or meaningless, you may fuzzify only without adding a guiding question.**
+Requirements:
+- Concrete and directly judgeable:
+  - Each item must be mechanically judgeable and executable; avoid subjective words such as comprehensive / deep / high-quality. Content must be specific, sourced from known information, non-fabricated, and must be verifiable.
+  - Do not mention mermaid node-related information (e.g. "whether it depends on node A", or "node A's output is node B's input"); for the agent being evaluated, mermaid does not exist — replace with judgments on concrete content.
+  - The judgment focus should be "whether the information holds, whether evidence supports it, whether reasoning is consistent", not "whether a specific retrieval action / click action / cross-verification step was performed".
+- Modify content according to how each node serves the query; remove out-of-scope judgments; do not be overly strict especially for substitutable evaluation content:
+  - Unless the question itself explicitly requires it, do not require specific tools, search engines, URLs, tool calls, or retrieval steps, because any search path may obtain the same information.
+  - Unless terminology must appear, do not require specific keywords or fixed phrasing, because different expressions can convey the same meaning — judge meaning, not expression.
+  - Unless a specific example must appear, allow different but reasonable examples. If an example is needed, write "provide at least one relevant instance or evidence".
+  - Unless the question explicitly requires comparing source credibility, do not write rigid scoring items such as "cross-verify across how many databases / prioritization workflow"; evaluate the evidence sufficiency and logical consistency of the final conclusion.
+  - If a node no longer helps answer the query, generate an empty criterion that still includes node_id, description, and other fields, but with empty `check_points`.
 
 ## Notes
 - Grounding is the first principle throughout the entire process:
-  - Strictly forbid adding any fabricated nodes or information: in both query and mermaid, do not introduce any undefined, non-commonly-known coined keywords (e.g. invented model names, abbreviations, scoring system names, method names). If widely known terms are used, they must come from `tool_response` verbatim or previous mermaid verbatim, and must be locatable in the evidence fragment pointed to by the corresponding `source_note`. Likewise, forbid outputting calculation/reasoning methods, numbers, formulas, or tier thresholds that have not been validated by standard methods (i.e. that could be obtained via query or search).
+  - Strictly forbid adding any fabricated nodes or information: in both rubric and mermaid, do not introduce any undefined, non-commonly-known coined keywords (e.g. invented model names, abbreviations, scoring system names, method names). If widely known terms are used, they must come from `tool_response` verbatim or previous mermaid verbatim, and must be locatable in the evidence fragment pointed to by the corresponding `source_note`. Likewise, forbid outputting calculation/reasoning methods, numbers, formulas, or tier thresholds that have not been validated by standard methods (i.e. that could be obtained via query or search).
   - Do not deliberately package for depth or professionalism: forbid outputting any named entities, abbreviations, or numeric rules not in the evidence set; forbid "terminology upgrade" (rewriting ordinary evidence descriptions into more professional but absent terms, e.g. changing "concrete steps" to "SOP", packaging "compare" as "coupling analysis", packaging "verify truth" as "authenticity discrimination model"). Do not import AI-coined quoted vague adjectives from trajectory answers (e.g. "loss of irony", "sense of barrenness", "mythic historicism"); use plain, generic wording (e.g. "multi-dimensional risk assessment"); do not coin new proper nouns.
 
 - Self-check before output:
   - Re-check all node labels, format, and granularity; ensure node content is concrete and compliant. Especially verify whether derivation edges strictly satisfy the definition "downstream node's premise is upstream node"; two tasks that can be completed independently should be defined as parallel.
-  - If the query contains "based on prior output / as above / previous section / previous round / continue last time / final version", rewrite as a self-contained version.
-  - If the query contains fixed scores / fixed thresholds / coined abbreviation systems / preset conclusions / single-sentence extremely long checklist stacking, rewrite into a verifiable, executable version.
-  - If structure node text / check_points / query use "professional packaging" terms absent from evidence (or not widely defined and accepted), such as SOP, game theory, hedging, closed-loop mechanism, or quoted terms, replace with plain synonymous expressions from the evidence.
-  - If query / structure node text / check_points use abstract product-oriented phrasing such as "design methodology / design system / design mechanism / build framework / execution manual", rewrite toward fact verification and analysis orientation.
+  - Check whether the rubric count matches the mermaid node count; if not, revise per step 4.
+  - Check whether rubric judgments exceed the query scope; all checkpoints must directly or indirectly serve the query's final goal. If any rubric is irrelevant to the query's final goal, revise per step 4.
+  - If structure node text / check_points use "professional packaging" terms absent from evidence (or not widely defined and accepted), such as SOP, game theory, hedging, closed-loop mechanism, or quoted terms, replace with plain synonymous expressions from the evidence.
+  - If structure node text / check_points use abstract product-oriented phrasing such as "design methodology / design system / design mechanism / build framework / execution manual", rewrite toward fact verification and analysis orientation.
   - If a term cannot be sourced in evidence, delete it and rewrite plainly; prefer being straightforward over deliberately sounding professional for depth.
 
 ## Output format
@@ -144,7 +144,7 @@ Your final output will be parsed as strict JSON:
 
 ```json
 {{
-  "mermaid": {{
+  "mermaid_new": {{
     "structure": "string",
     "nodes": [
       {{
@@ -156,7 +156,16 @@ Your final output will be parsed as strict JSON:
       }}
     ]
   }},
-  "query": "string"
+  "rubric": {{
+    "query_id": "string",
+    "criteria": [
+      {{
+        "node_id": "A",
+        "description": "string",
+        "check_points": ["string"]
+      }}
+    ]
+  }}
 }}
 ```
 

@@ -50,3 +50,7 @@ cd agentic-rl && pip install -r requirements.txt
 ## 需要通过pip install -e .安装atomic_eval和Bfcl：
 cd../../gorilla/berkeley-function-call-leaderboard && pip install -e . && \
 cd ../../atomic_eval && pip install -e . && \
+
+
+python -m experiment.export_complexity_exploration_review
+python -m experiment.translate_review_csv --concurrency 32

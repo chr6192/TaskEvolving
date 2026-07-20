@@ -1062,6 +1062,7 @@ class MermaidReviserAgent:
         traj_k: TrajectoryData,
         metadata: Optional[Dict[str, Any]] = None,
         focus_leaf_id: Optional[str] = None,
+        include_title_query: bool = False,
     ) -> Dict[str, Any]:
         """基于 stage1 的 mermaid 与 trajectory，生成 query 和 query_fuzzified。"""
         query_out = await self.generate_query(
@@ -1074,7 +1075,18 @@ class MermaidReviserAgent:
             query=query_out["query"],
             metadata=metadata,
         )
-        return {**query_out, **fuzz_out}
+        result = {**query_out, **fuzz_out}
+        if include_title_query:
+            mermaid_str = (stage1_out.get("mermaid") or "").strip()
+            if mermaid_str:
+                title_out = await self.generate_title_query(
+                    mermaid=mermaid_str,
+                    metadata=metadata,
+                )
+                result.update(title_out)
+            else:
+                result["title_query"] = None
+        return result
 
     async def generate_leaf_queries(
         self,

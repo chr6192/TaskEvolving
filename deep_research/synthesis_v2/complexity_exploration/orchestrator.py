@@ -61,7 +61,11 @@ def _allocate_unique_dir(base_dir):
         i += 1
 
 
-RESUMABLE_STOP_REASONS = frozenset({"max_iterations_reached"})
+# 正常收敛：结构稳定 / 推理链过长等预期停止，不应续跑。
+NORMAL_CONVERGENCE_REASON_PREFIXES = (
+    "mermaid_depth_and_node_count_unchanged_for_2_rounds",
+    "reasoning_chain_too_long",
+)
 
 
 class ComplexityExplorationV2:
@@ -107,8 +111,9 @@ class ComplexityExplorationV2:
         query_fuzzified: Optional[str],
         mermaid: Optional[Mermaid],
         rubric: Optional[dict],
+        title_query: Optional[str] = None,
     ) -> dict:
-        return {
+        summary = {
             "iteration_id": iteration_id,
             "query": query,
             "query_fuzzified": query_fuzzified or query,
@@ -119,6 +124,9 @@ class ComplexityExplorationV2:
             "node_count": len(mermaid.node_dicts()) if mermaid else None,
             "rubric": rubric,
         }
+        if title_query is not None:
+            summary["title_query"] = title_query
+        return summary
 
     @staticmethod
     def _build_exploration_stop_record(
@@ -252,6 +260,115 @@ class ComplexityExplorationV2:
         )
 
     @classmethod
+    def _is_normal_convergence_reason(cls, reason: str) -> bool:
+        reason = (reason or "").strip()
+        if not reason or reason == "completed":
+            return True
+        if reason == "resume_start_beyond_max_iterations":
+            return True
+        return any(reason.startswith(prefix) for prefix in NORMAL_CONVERGENCE_REASON_PREFIXES)
+
+    @staticmethod
+    def _max_traj_iteration_id(evolution_dir: Path) -> Optional[int]:
+        traj_ids: List[int] = []
+        for path in evolution_dir.glob("traj_*.jsonl"):
+            suffix = path.stem.removeprefix("traj_")
+            if suffix.isdigit():
+                traj_ids.append(int(suffix))
+        return max(traj_ids) if traj_ids else None
+
+    @classmethod
+    def _resolve_resume_position(
+        cls,
+        summaries: List[dict],
+        stop: dict,
+        evolution_dir: Path,
+    ) -> dict:
+        """
+        解析续跑位置。
+
+        - pending：reviser 已完成，下一轮 pipeline 尚未跑（如 max_iterations_reached）
+        - retry：当前 iteration 中途失败，从该轮重新跑（如 error / timeout）
+        """
+        if not summaries:
+            return {"status": "empty_iterations", "evolution_dir": str(evolution_dir)}
+
+        reason = str(stop.get("reason") or "")
+        has_stop = bool(stop)
+        if has_stop and cls._is_normal_convergence_reason(reason):
+            return {
+                "status": "not_resumable",
+                "evolution_dir": str(evolution_dir),
+                "reason": reason,
+            }
+
+        last = summaries[-1]
+        last_id = last.get("iteration_id")
+        if not isinstance(last_id, int):
+            return {
+                "status": "invalid_last_iteration_id",
+                "evolution_dir": str(evolution_dir),
+                "reason": reason or "missing_exploration_stop",
+            }
+
+        stop_at = stop.get("stop_at_iteration_id") if has_stop else None
+        resume_mode: Optional[str] = None
+        resume_from: Optional[int] = None
+
+        if has_stop and isinstance(stop_at, int):
+            if last_id == stop_at + 1:
+                resume_mode = "pending"
+                resume_from = last_id
+            elif last_id == stop_at:
+                resume_mode = "retry"
+                resume_from = stop_at
+            else:
+                return {
+                    "status": "unexpected_checkpoint",
+                    "evolution_dir": str(evolution_dir),
+                    "reason": reason,
+                    "stop_at_iteration_id": stop_at,
+                    "last_iteration_id": last_id,
+                }
+        else:
+            max_traj = cls._max_traj_iteration_id(evolution_dir)
+            if max_traj is None:
+                return {
+                    "status": "missing_traj_for_crash_resume",
+                    "evolution_dir": str(evolution_dir),
+                    "reason": reason or "missing_exploration_stop",
+                    "last_iteration_id": last_id,
+                }
+            if last_id == max_traj + 1:
+                resume_mode = "pending"
+                resume_from = last_id
+                stop_at = last_id - 1
+            elif last_id == max_traj:
+                resume_mode = "retry"
+                resume_from = last_id
+                stop_at = last_id
+            else:
+                return {
+                    "status": "ambiguous_crash_state",
+                    "evolution_dir": str(evolution_dir),
+                    "reason": reason or "missing_exploration_stop",
+                    "last_iteration_id": last_id,
+                    "max_traj_iteration_id": max_traj,
+                }
+
+        streak = cls._compute_no_structure_change_streak(summaries)
+        return {
+            "status": "resumable",
+            "evolution_dir": str(evolution_dir),
+            "reason": reason or "missing_exploration_stop",
+            "resume_mode": resume_mode,
+            "stop_at_iteration_id": stop_at,
+            "resume_from_iteration_id": resume_from,
+            "no_structure_change_streak": streak,
+            "pipeline_iterations_completed": stop.get("pipeline_iterations_completed"),
+        }
+
+    @classmethod
     def inspect_resume(cls, evolution_dir) -> dict:
         """
         检查目录是否可断点续跑。返回 status/resume_from_iteration_id 等字段。
@@ -264,43 +381,7 @@ class ComplexityExplorationV2:
         payload = json.loads(iterations_path.read_text(encoding="utf-8"))
         summaries = payload.get("iterations") or []
         stop = payload.get("exploration_stop") or {}
-        reason = str(stop.get("reason") or "")
-
-        if reason not in RESUMABLE_STOP_REASONS:
-            return {
-                "status": "not_resumable",
-                "evolution_dir": str(evolution_dir),
-                "reason": reason or "unknown",
-            }
-        if not summaries:
-            return {"status": "empty_iterations", "evolution_dir": str(evolution_dir)}
-
-        stop_at = stop.get("stop_at_iteration_id")
-        if not isinstance(stop_at, int):
-            return {"status": "missing_stop_at", "evolution_dir": str(evolution_dir), "reason": reason}
-
-        pending = summaries[-1]
-        pending_id = pending.get("iteration_id")
-        if pending_id != stop_at + 1:
-            return {
-                "status": "unexpected_pending_iteration",
-                "evolution_dir": str(evolution_dir),
-                "reason": reason,
-                "stop_at_iteration_id": stop_at,
-                "pending_iteration_id": pending_id,
-            }
-
-        streak = cls._compute_no_structure_change_streak(summaries)
-
-        return {
-            "status": "resumable",
-            "evolution_dir": str(evolution_dir),
-            "reason": reason,
-            "stop_at_iteration_id": stop_at,
-            "resume_from_iteration_id": pending_id,
-            "no_structure_change_streak": streak,
-            "pipeline_iterations_completed": stop.get("pipeline_iterations_completed"),
-        }
+        return cls._resolve_resume_position(summaries, stop, evolution_dir)
 
     @classmethod
     def _load_resume_checkpoint(cls, evolution_dir, seed_query: QueryData) -> dict:
@@ -314,7 +395,9 @@ class ComplexityExplorationV2:
         payload = json.loads(iterations_path.read_text(encoding="utf-8"))
         summaries = list(payload.get("iterations") or [])
         stop = payload.get("exploration_stop") or {}
-        pending = summaries.pop()
+        resume_mode = str(info.get("resume_mode") or "pending")
+        checkpoint = summaries.pop()
+        start_iteration_id = int(checkpoint["iteration_id"])
 
         reviser_path = Path(evolution_dir) / "reviser.json"
         reviser_summaries: List[dict] = []
@@ -325,14 +408,16 @@ class ComplexityExplorationV2:
 
         return {
             "evolution_id": str(stop.get("evolution_id") or uuid.uuid4()),
-            "start_iteration_id": int(pending["iteration_id"]),
-            "current_query": cls._query_from_summary(pending, seed_query),
-            "mermaid": cls._mermaid_from_summary(pending),
-            "rubric": pending.get("rubric"),
+            "resume_mode": resume_mode,
+            "start_iteration_id": start_iteration_id,
+            "current_query": cls._query_from_summary(checkpoint, seed_query),
+            "mermaid": cls._mermaid_from_summary(checkpoint),
+            "rubric": checkpoint.get("rubric"),
+            "title_query": checkpoint.get("title_query"),
             "iteration_summaries": summaries,
             "reviser_summaries": reviser_summaries,
             "no_structure_change_streak": int(info.get("no_structure_change_streak") or 0),
-            "stop_reason": str(stop.get("reason") or ""),
+            "stop_reason": str(info.get("reason") or stop.get("reason") or ""),
         }
     
     def _review_expand_task_output(
@@ -361,8 +446,8 @@ class ComplexityExplorationV2:
         Args:
             seed_query: 种子query
             best_of_n: 覆盖 best-of-n 采样数（每轮 iteration 内部使用；<=1 等价不启用）
-            resume_dir: 若指定，从该目录的 iterations.json 断点续跑（仅支持
-                exploration_stop.reason == max_iterations_reached）
+            resume_dir: 若指定，从该目录的 iterations.json 断点续跑（除正常结构收敛外，
+                含 max_iterations_reached、error、timeout、进程中断等异常停止）
             
         Returns:
             演化过程（包含所有迭代）
@@ -409,6 +494,7 @@ class ComplexityExplorationV2:
             current_query = resume_checkpoint["current_query"]
             mermaid = resume_checkpoint["mermaid"]
             rubric = resume_checkpoint["rubric"]
+            title_query = resume_checkpoint.get("title_query")
             evolution_dir = Path(resume_dir).resolve()
         else:
             evolution = QueryEvolution(
@@ -420,6 +506,7 @@ class ComplexityExplorationV2:
             current_query = seed_query
             mermaid = None
             rubric = None
+            title_query = None
 
             output_root = resolve_under_repo(
                 self.exploration_config.get("output_dir", "outputs/complexity_exploration"),
@@ -589,6 +676,7 @@ class ComplexityExplorationV2:
                         (current_query.metadata or {}).get("query_fuzzified"),
                         mermaid,
                         rubric,
+                        title_query=title_query,
                     )
                 )
                 self._write_iterations_file(iterations_path, iteration_summaries)
@@ -641,6 +729,7 @@ class ComplexityExplorationV2:
                         stage1_out=revise_stage1_out,
                         traj_k=traj_k,
                         metadata=reviser_metadata,
+                        include_title_query=True,
                     )
                 except Exception as e:
                     logger.warning(
@@ -658,6 +747,7 @@ class ComplexityExplorationV2:
                 query_next = revise_stage2_out.get("query", "")
                 rubric_next = revise_stage1_out["rubric"]
                 query_fuzzified_next = revise_stage2_out["query_fuzzified"]
+                title_query_next = revise_stage2_out.get("title_query")
                 leaf_queries_next: List[dict] = []
                 final_evolved_query = QueryData(
                     query_id=str(uuid.uuid4()),
@@ -711,15 +801,17 @@ class ComplexityExplorationV2:
                             query_fuzzified_next,
                             mermaid_next,
                             rubric_next,
+                            title_query=title_query_next,
                         )
                     )
                     stop_at_iteration_id = iteration_id
                     _finalize_iterations_file()
                     break
                 
-                # 10. 准备下一轮：更新 (mermaid, query, rubric)
+                # 10. 准备下一轮：更新 (mermaid, query, rubric, title_query)
                 mermaid = mermaid_next
                 rubric = rubric_next
+                title_query = title_query_next
                 current_query = final_evolved_query
                 
             except Exception as e:

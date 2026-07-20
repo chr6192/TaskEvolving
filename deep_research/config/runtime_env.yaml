@@ -3,8 +3,8 @@ excludes: ["/.git/"]
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments: False"
-  WANDB_API_KEY: "***REMOVED***"
-  WANDB_BASE_URL: "http://REDACTED_INTERNAL_IP:8080"
+  WANDB_API_KEY: "xxx"
+  WANDB_BASE_URL: "***REMOVED***"
   HYDRA_FULL_ERROR: "1"
   OPENAI_API_KEY: "xxx"
   TENSORBOARD_DIR: "/home/admin/logs/tfevent"

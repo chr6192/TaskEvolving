@@ -1,0 +1,17 @@
+tools:
+  - class_name: deep_research.tool.dr_tool_as.TavilySearchTool
+    config:
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: tavily_search
+        description: 通过 Tavily API 进行网络搜索，返回面向 AI 应用优化的结构化搜索结果。
+        parameters:
+          type: object
+          properties:
+            query:
+              type: string
+              description: 搜索关键词，例如 "Recent earnings report"。
+          required:
+          - query

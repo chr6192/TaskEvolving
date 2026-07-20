@@ -37,7 +37,7 @@ multi_turn:
   max_turns: 20
   format: "hermes"
   completion_callback: "deep_research.synthesis.core.dr_synthesis_completion_callback.DrSynthesisCompletionCallback"
-  tool_config_path: "deep_research/config/tool_config/normal.yaml"
+  tool_config_path: "deep_research/config/tool_config/google_jina.yaml"
 
 query_generation:
   num_queries_per_batch: 10

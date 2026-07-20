@@ -1,0 +1,48 @@
+tools:
+  - class_name: deep_research.tool.dr_tool_as.BaiduSearchTool
+    config:
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: baidu_search
+        description: 通过百度千帆 AI 搜索 API 进行全网实时搜索，返回标题、摘要、网址等结构化结果。
+        parameters:
+          type: object
+          properties:
+            query:
+              type: string
+              description: 搜索关键词（最多 72 字符单位，中文按 2 个字符计）。
+            top_k:
+              type: integer
+              description: 返回网页结果数量，默认 10，最大 50。
+            edition:
+              type: string
+              description: 搜索版本，standard（完整版）或 lite（低时延版），默认 standard。
+            search_recency_filter:
+              type: string
+              description: 时间筛选，可选 week、month、semiyear、year。
+            sites:
+              type: array
+              items:
+                type: string
+              description: 限定搜索站点，例如 ["baike.baidu.com"]。
+          required:
+          - query
+
+  - class_name: deep_research.tool.dr_tool_as.WebScrapeTool
+    config:
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: web_scrape
+        description: 智能网页抓取：优先使用 Jina AI 解析动态内容，失败时使用 requests+MarkItDown。
+        parameters:
+          type: object
+          properties:
+            url:
+              type: string
+              description: 要抓取的网页 URL，例如 https://example.com/article。
+          required:
+          - url

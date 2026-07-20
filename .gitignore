@@ -89,8 +89,14 @@ target/
 # celery beat schedule file
 celerybeat-schedule
 
-# dotenv
+# dotenv / local secrets (never push real keys)
 .env
+.env.*
+*.local.yaml
+*.yaml.local
+**/runtime_env.yaml.local
+**/synthesis_v2.yaml.local
+**/secrets/
 
 # virtualenv
 venv/

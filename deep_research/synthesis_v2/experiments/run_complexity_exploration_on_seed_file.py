@@ -3,8 +3,7 @@
 
 用法示例：
   python deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
-    --language en \
-    --best-of-n 3
+    --language en
 
   # 最多 3 条 seed 并行探索（默认）
   python deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
@@ -16,7 +15,7 @@
     --input deep_research/synthesis_v2/data/nq_ch.jsonl \
     --language cn
 
-  # 断点续跑：对已因 max_iterations_reached 触顶的 case，在调高 max_iterations 后继续
+  # 断点续跑：非正常结束（触顶/error/崩溃等）从 iterations.json 检查点继续
   python deep_research/synthesis_v2/experiments/run_complexity_exploration_on_seed_file.py \
     --resume \
     --max-concurrent-seeds 2
@@ -297,7 +296,7 @@ def main() -> None:
             "en -> data/nq_open_seed_queries_1000.jsonl."
         ),
     )
-    parser.add_argument("--best-of-n", type=int, default=3)
+    parser.add_argument("--best-of-n", type=int, default=1)
     parser.add_argument(
         "--max-concurrent-seeds",
         type=int,
@@ -317,8 +316,8 @@ def main() -> None:
         "--resume",
         action="store_true",
         help=(
-            "断点续跑：对已存在且 exploration_stop.reason=max_iterations_reached 的 case，"
-            "从 iterations.json 中 pending 的下一轮继续（需先把 max_iterations 调高）。"
+            "断点续跑：跳过已正常收敛的 case；对 max_iterations_reached、error、timeout、"
+            "未写入 exploration_stop 的崩溃等，从 iterations.json 检查点继续。"
         ),
     )
     parser.add_argument(

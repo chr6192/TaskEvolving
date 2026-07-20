@@ -1,0 +1,46 @@
+tools:
+  - class_name: deep_research.tool.dr_tool_as.GoogleSearchTool
+    config:
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: google_search
+        description: 通过 Serper API 进行 Google 搜索，返回知识图谱、People Also Ask、相关搜索等丰富结果。
+        parameters:
+          type: object
+          properties:
+            q:
+              type: string
+              description: 搜索关键词/查询，例如 "Recent earnings report"。
+            gl:
+              type: string
+              description: 国家/地区代码，默认 "us"。
+            hl:
+              type: string
+              description: 界面语言，默认 "en"。
+            num:
+              type: integer
+              description: 返回结果数量，默认 10。
+            tbs:
+              type: string
+              description: 时间/筛选条件，例如 "qdr:w" 表示过去一周。
+          required:
+          - q
+
+  - class_name: deep_research.tool.dr_tool_as.WebScrapeTool
+    config:
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: web_scrape
+        description: 智能网页抓取：优先使用 Jina AI 解析动态内容，失败时使用 requests+MarkItDown。
+        parameters:
+          type: object
+          properties:
+            url:
+              type: string
+              description: 要抓取的网页 URL，例如 https://example.com/article。
+          required:
+          - url

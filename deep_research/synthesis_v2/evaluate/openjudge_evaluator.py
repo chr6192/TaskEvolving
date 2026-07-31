@@ -1,6 +1,6 @@
 """
 OpenJudge评估器适配器
-复用现有的ORMEvaluator，适配到新的接口
+将 ORMEvaluator 适配到标准 evaluator 接口。
 """
 import logging
 import uuid
@@ -8,9 +8,14 @@ from typing import Dict, Any
 from omegaconf import DictConfig
 
 from .base import EvaluatorBase
-from ..core.data_structures import WorkflowOutput, EvaluationResult
-from deep_research.synthesis.core.orm_evaluator import ORMEvaluator
-from deep_research.synthesis.core.data_structures import TrajectoryData
+from ..core.data_structures import (
+    EvaluationResult,
+    ToolCall,
+    ToolResponse,
+    TrajectoryData,
+    WorkflowOutput,
+)
+from ..core.orm_evaluator import ORMEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +81,6 @@ class OpenJudgeEvaluator(EvaluatorBase):
         context: Dict[str, Any]
     ) -> TrajectoryData:
         """将WorkflowOutput转换为TrajectoryData"""
-        from deep_research.synthesis.core.data_structures import ToolCall, ToolResponse
-
         # evaluator 内部统一合并上下文：
         # - `context` 通常来自 WorkflowInput.metadata
         # - `workflow_output.metadata` 通常包含 workflow 运行时产出的关键字段（如 query、rubrics 等）
@@ -107,7 +110,6 @@ class OpenJudgeEvaluator(EvaluatorBase):
         # 创建TrajectoryData
         trajectory = TrajectoryData(
             trajectory_id=trajectory_id,
-            skeleton_id=merged_context.get('skeleton_id'),
             query_id=merged_context.get('query_id', str(uuid.uuid4())),
             query=merged_context.get('query'),
             messages=workflow_output.messages,

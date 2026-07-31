@@ -7,7 +7,7 @@ from omegaconf import DictConfig
 
 from ..workflow.base import WorkflowBase
 from ..core.data_structures import WorkflowInput, WorkflowOutput
-from deep_research.synthesis.core.query_generator import QueryGenerator
+from .query_generator import QueryGenerator
 
 logger = logging.getLogger(__name__)
 

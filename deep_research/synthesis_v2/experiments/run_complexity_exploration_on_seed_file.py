@@ -49,7 +49,7 @@ def _prefer_local_repo_packages() -> None:
 
 _prefer_local_repo_packages()
 
-from deep_research.synthesis.core.data_structures import QueryData
+from deep_research.synthesis_v2.core.data_structures import QueryData
 from deep_research.synthesis_v2.complexity_exploration.mermaid_reviser import MermaidReviserAgent
 from deep_research.synthesis_v2.complexity_exploration.orchestrator import ComplexityExplorationV2
 from deep_research.synthesis_v2.core.concurrency import ConcurrencyManager

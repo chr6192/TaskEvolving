@@ -8,13 +8,13 @@ from typing import Any, Dict, List, Optional
 from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field
 
-from deep_research.synthesis.core.data_structures import TrajectoryData
-from deep_research.synthesis.core.message_context_utils import (
+from ..core.data_structures import TrajectoryData
+from ..core.message_context_utils import (
     TOOL_RESPONSE_TRUNCATION_SUFFIX,
     apply_trajectory_view_char_budget,
     resolve_request_input_char_budget,
 )
-from deep_research.synthesis.core.structured_llm_client import StructuredLLMClient
+from ..core.structured_llm_client import StructuredLLMClient
 from deep_research.synthesis_v2.core.language import VALID_NODE_TYPES, normalize_language
 from deep_research.synthesis_v2.prompts.fuzzify_query_prompt import (
     build_fuzzify_query_prompt,

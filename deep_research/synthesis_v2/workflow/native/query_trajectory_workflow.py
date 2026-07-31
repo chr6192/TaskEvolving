@@ -1,8 +1,8 @@
 """
-原生 Query→Trajectory Workflow（不使用 Skeleton）
+原生 Query→Trajectory Workflow
 
-将 deep_research.synthesis.core.trajectory_generator.TrajectoryGenerator.generate_from_query
-封装为标准 workflow，保持与 synthesis_v2 pipeline/evaluator 的接口一致。
+将 TrajectoryGenerator.generate_from_query 封装为标准 workflow，
+保持与 synthesis_v2 pipeline/evaluator 的接口一致。
 """
 
 import logging
@@ -12,15 +12,14 @@ from typing import Optional
 from omegaconf import DictConfig
 
 from ..base import WorkflowBase
-from ...core.data_structures import WorkflowInput, WorkflowOutput
-from deep_research.synthesis.core.data_structures import QueryData
-from deep_research.synthesis.core.trajectory_generator import TrajectoryGenerator
+from ...core.data_structures import QueryData, WorkflowInput, WorkflowOutput
+from ...core.trajectory_generator import TrajectoryGenerator
 
 logger = logging.getLogger(__name__)
 
 
 class QueryTrajectoryWorkflow(WorkflowBase):
-    """从 query 直接生成 trajectory 的 workflow（完全绕过 Skeleton）。"""
+    """从 query 直接生成 trajectory 的 workflow。"""
 
     def __init__(self, config: DictConfig):
         self.config = config

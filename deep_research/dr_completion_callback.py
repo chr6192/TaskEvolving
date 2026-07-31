@@ -23,7 +23,7 @@ from verl.tools.base_tool import initialize_tools_from_config
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.workers.rollout.chat_scheduler import CompletionCallback
-from deep_research.synthesis.core.llm_utils import parse_tool_call_arguments
+from deep_research.llm_utils import parse_tool_call_arguments
 
 logger = logging.getLogger(__file__)
 

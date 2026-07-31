@@ -11,20 +11,20 @@ from typing import Dict, List, Optional
 from datetime import datetime
 from omegaconf import DictConfig
 
-from ..core.data_structures import WorkflowInput
+from ..core.data_structures import (
+    IterationData,
+    QueryData,
+    QueryEvolution,
+    ToolCall,
+    ToolResponse,
+    TrajectoryData,
+    WorkflowInput,
+)
 from ..core.batch_processor import BatchProcessor
 from ..core.pipeline import SamplePipeline
 from ..core.language import is_reasoning_node_type
 from ..io.path_utils import resolve_under_repo
 from ..io.streaming_writer import StreamingWriter
-from deep_research.synthesis.core.data_structures import (
-    QueryData,
-    QueryEvolution,
-    IterationData,
-    TrajectoryData,
-    ToolCall,
-    ToolResponse,
-)
 from .mermaid_reviser import MermaidReviserAgent
 from ..mermaid import Mermaid
 
@@ -865,7 +865,6 @@ class ComplexityExplorationV2:
 
         return TrajectoryData(
             trajectory_id=trajectory_id,
-            skeleton_id=merged_context.get("skeleton_id"),
             query_id=merged_context.get("query_id", str(uuid.uuid4())),
             query=merged_context.get("query"),
             messages=getattr(workflow_output, "messages", []) or [],

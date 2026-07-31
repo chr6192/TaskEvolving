@@ -35,7 +35,7 @@ from deep_research.reward.openjudge_reward_manager import (
     RewardResult,
     RewardSample,
 )
-from deep_research.synthesis.core.llm_utils import resolve_rubric_api_key
+from deep_research.llm_utils import resolve_rubric_api_key
 
 
 class OpenJudgeRewardFunction(BaseOpenJudgeRewardFunction):

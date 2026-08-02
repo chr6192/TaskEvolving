@@ -1,0 +1,548 @@
+diff --git a/verl/__init__.py b/verl/__init__.py
+index 76ce20a6..c154d0a8 100644
+--- a/verl/__init__.py
++++ b/verl/__init__.py
+@@ -15,9 +15,12 @@
+ import logging
+ import os
+ 
+-import pkg_resources
+ from packaging.version import parse as parse_version
+-from pkg_resources import DistributionNotFound
++try:
++    # Python 3.8+ standard library
++    from importlib import metadata as importlib_metadata  # type: ignore
++except Exception:  # pragma: no cover
++    importlib_metadata = None  # type: ignore
+ 
+ from .protocol import DataProto
+ from .utils.device import is_npu_available
+@@ -50,11 +53,13 @@ if is_npu_available:
+     package_name = "transformers"
+     required_version_spec = "4.52.4"
+     try:
+-        installed_version = pkg_resources.get_distribution(package_name).version
++        if importlib_metadata is None:
++            raise ImportError("importlib.metadata is unavailable")
++        installed_version = importlib_metadata.version(package_name)
+         installed = parse_version(installed_version)
+         required = parse_version(required_version_spec)
+ 
+         if not installed >= required:
+             raise ValueError(f"{package_name} version >= {required_version_spec} is required on ASCEND NPU, current version is {installed}.")
+-    except DistributionNotFound as e:
++    except Exception as e:
+         raise ImportError(f"package {package_name} is not installed, please run pip install {package_name}=={required_version_spec}") from e
+diff --git a/verl/tools/utils/mcp_clients/McpClientManager.py b/verl/tools/utils/mcp_clients/McpClientManager.py
+index ee5fe311..4c07ae98 100644
+--- a/verl/tools/utils/mcp_clients/McpClientManager.py
++++ b/verl/tools/utils/mcp_clients/McpClientManager.py
+@@ -1,97 +1,149 @@
+-# Copyright 2025 Bytedance Ltd. and/or its affiliates
+-#
+-# Licensed under the Apache License, Version 2.0 (the "License");
+-# you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at
+-#
+-#     http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS,
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-# See the License for the specific language governing permissions and
+-# limitations under the License.
+-
+-import asyncio
+-import json
+-import logging
+-from typing import Any
+-
+-from fastmcp import Client
+-from fastmcp.client.transports import SSETransport
+-
+-from verl.tools.utils.mcp_clients.utils import TokenBucket, mcp2openai
+-
+-logger = logging.getLogger(__name__)
+-
+-
+-class MCPClientManager:
+-    rootServerName = "mcpServers"
+-    initialized = False
+-    clients = []
+-    tool_client_mapping = {}
+-    rate_limiter = None
+-
+-    async def initialize(self, config_path, rate_limit: float = 10.0):
+-        if self.initialized:
+-            return
+-        """Initialize the MCP Client Manager and start all clients"""
+-        result = self._load_config(config_path)
+-        servers = result[self.rootServerName]
+-        exclude_sse_servers = {self.rootServerName: {}}
+-        for server_name in servers.keys():
+-            server = servers[server_name]
+-            if "auth_token" in server:
+-                transport = SSETransport(url=server["url"], headers={"Authorization": f"Bearer {server['auth_token']}"})
+-                client = Client(transport)
+-                self.clients.append(client)
+-            else:
+-                exclude_sse_servers[self.rootServerName][server_name] = server
+-
+-        if exclude_sse_servers[self.rootServerName]:
+-            self.clients.append(Client(exclude_sse_servers))
+-
+-        # Initialize rate limiter
+-        self.rate_limiter = TokenBucket(rate_limit)
+-        self.initialized = True
+-
+-    async def call_tool(self, tool_name, parameters, timeout):
+-        # Apply rate limiting
+-        while not self.rate_limiter.acquire():
+-            await asyncio.sleep(0.1)
+-
+-        client = self.get_client_with_tool_name(tool_name)
+-        async with client:
+-            return await client.call_tool_mcp(tool_name, parameters)
+-
+-    async def fetch_tool_schemas(self, tool_selected_list: list[str]) -> list[dict]:
+-        tool_schemas = []
+-        for client in self.clients:
+-            async with client:
+-                tools = await client.list_tools_mcp()
+-                for tool in tools.tools:
+-                    if not tool_selected_list:
+-                        self.tool_client_mapping[tool.name] = client
+-                        tool_schemas.append(mcp2openai(tool))
+-                    elif tool.name in tool_selected_list:
+-                        self.tool_client_mapping[tool.name] = client
+-                        tool_schemas.append(mcp2openai(tool))
+-
+-        return tool_schemas
+-
+-    def get_client_with_tool_name(self, tool_name: str):
+-        return self.tool_client_mapping[tool_name]
+-
+-    def _load_config(self, file: str) -> dict[str, Any]:
+-        try:
+-            with open(file) as f:
+-                return json.load(f)
+-        except FileNotFoundError:
+-            logger.warning(f'the "{file}" file was not found')
+-        except Exception:
+-            logger.error(f'there was an error reading the "{file}" file')
+-
+-        return {}
+-
+-
+-ClientManager = MCPClientManager()
++# Copyright 2025 Bytedance Ltd. and/or its affiliates
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import asyncio
++import json
++import logging
++import random
++from typing import Any
++
++from fastmcp import Client
++from fastmcp.client.transports import SSETransport
++
++from verl.tools.utils.mcp_clients.utils import TokenBucket, mcp2openai
++
++logger = logging.getLogger(__name__)
++
++
++class MCPClientManager:
++    rootServerName = "mcpServers"
++    initialized = False
++    clients = []
++    tool_client_mapping = {}
++    rate_limiter = None
++    mcp_call_max_retries = 3
++    mcp_call_initial_wait = 1.0
++    mcp_call_max_wait = 8.0
++
++    async def initialize(self, config_path, rate_limit: float = 10.0):
++        if self.initialized:
++            return
++        """Initialize the MCP Client Manager and start all clients"""
++        result = self._load_config(config_path)
++        servers = result[self.rootServerName]
++        exclude_sse_servers = {self.rootServerName: {}}
++        for server_name in servers.keys():
++            server = servers[server_name]
++            if "auth_token" in server:
++                transport = SSETransport(url=server["url"], headers={"Authorization": f"Bearer {server['auth_token']}"})
++                client = Client(transport)
++                self.clients.append(client)
++            else:
++                exclude_sse_servers[self.rootServerName][server_name] = server
++
++        if exclude_sse_servers[self.rootServerName]:
++            self.clients.append(Client(exclude_sse_servers))
++
++        # Initialize rate limiter
++        self.rate_limiter = TokenBucket(rate_limit)
++        self.initialized = True
++
++    async def call_tool(self, tool_name, parameters, timeout):
++        # Apply rate limiting
++        while not self.rate_limiter.acquire():
++            await asyncio.sleep(0.1)
++
++        client = self.get_client_with_tool_name(tool_name)
++        last_exception = None
++        request_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
++        for attempt in range(self.mcp_call_max_retries + 1):
++            try:
++                async with client:
++                    call_coro = client.call_tool_mcp(tool_name, parameters)
++                    if request_timeout is None:
++                        return await call_coro
++                    return await asyncio.wait_for(call_coro, timeout=request_timeout)
++            except Exception as exc:
++                last_exception = exc
++                if not self._is_retryable_mcp_exception(exc) or attempt >= self.mcp_call_max_retries:
++                    raise
++
++                wait_seconds = self._calculate_retry_wait(attempt + 1)
++                logger.warning(
++                    "MCP tool call failed with retryable error. "
++                    f"tool={tool_name}, attempt={attempt + 1}/{self.mcp_call_max_retries}, "
++                    f"wait={wait_seconds:.2f}s, error={exc}"
++                )
++                await asyncio.sleep(wait_seconds)
++
++        if last_exception:
++            raise last_exception
++
++    def _is_retryable_mcp_exception(self, exc: Exception) -> bool:
++        if isinstance(exc, asyncio.TimeoutError):
++            return True
++
++        exc_type = type(exc).__name__.lower()
++        error_text = str(exc).lower()
++        retryable_tokens = (
++            "timeout",
++            "connect",
++            "connection",
++            "temporarily unavailable",
++            "econnreset",
++            "broken pipe",
++            "network",
++            "remoteprotocolerror",
++            "readerror",
++            "writeerror",
++        )
++        return any(token in exc_type or token in error_text for token in retryable_tokens)
++
++    def _calculate_retry_wait(self, retry_count: int) -> float:
++        wait_time = self.mcp_call_initial_wait * (2 ** (retry_count - 1))
++        wait_time = min(wait_time, self.mcp_call_max_wait)
++        # 添加少量抖动，避免并发请求同步重试
++        return wait_time + random.uniform(0, 0.3 * wait_time)
++
++    async def fetch_tool_schemas(self, tool_selected_list: list[str]) -> list[dict]:
++        tool_schemas = []
++        for client in self.clients:
++            async with client:
++                tools = await client.list_tools_mcp()
++                for tool in tools.tools:
++                    if not tool_selected_list:
++                        self.tool_client_mapping[tool.name] = client
++                        tool_schemas.append(mcp2openai(tool))
++                    elif tool.name in tool_selected_list:
++                        self.tool_client_mapping[tool.name] = client
++                        tool_schemas.append(mcp2openai(tool))
++
++        return tool_schemas
++
++    def get_client_with_tool_name(self, tool_name: str):
++        return self.tool_client_mapping[tool_name]
++
++    def _load_config(self, file: str) -> dict[str, Any]:
++        try:
++            with open(file) as f:
++                return json.load(f)
++        except FileNotFoundError:
++            logger.warning(f'the "{file}" file was not found')
++        except Exception:
++            logger.error(f'there was an error reading the "{file}" file')
++
++        return {}
++
++
++ClientManager = MCPClientManager()
+diff --git a/verl/trainer/main_ppo.py b/verl/trainer/main_ppo.py
+index 8fda4105..b11e5912 100644
+--- a/verl/trainer/main_ppo.py
++++ b/verl/trainer/main_ppo.py
+@@ -168,8 +168,11 @@ class TaskRunner:
+         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+         train_sampler = create_rl_sampler(config.data, train_dataset)
+ 
++        # Determine which trainer class to use
++        trainer_cls = get_trainer_class(config)
++
+         # Initialize the PPO trainer.
+-        trainer = RayPPOTrainer(
++        trainer = trainer_cls(
+             config=config,
+             tokenizer=tokenizer,
+             processor=processor,
+@@ -190,6 +193,55 @@ class TaskRunner:
+         trainer.fit()
+ 
+ 
++def get_trainer_class(config):
++    """Determine which trainer class to use based on configuration.
++
++    Arguments:
++        config: The configuration object.
++
++    Returns:
++        trainer_cls: The trainer class to use.
++    """
++
++    # Check if a custom trainer class is specified in the configuration
++    custom_class_path = None
++    if hasattr(config, 'trainer'):
++        if hasattr(config.trainer, 'custom_class_path') and config.trainer.custom_class_path is not None:
++            # Format: custom_class_path = "module.path.ClassName"
++            custom_class_path = config.trainer.custom_class_path
++
++    if custom_class_path:
++        import importlib
++
++        print(f"Loading custom trainer class from path: {custom_class_path}")
++
++        try:
++            # Split the path to get module path and class name
++            # Assume the class name is the last part after the last dot
++            parts = custom_class_path.split(".")
++            class_name = parts[-1]
++            module_path = ".".join(parts[:-1])
++
++            # Import the module and get the class
++            module = importlib.import_module(module_path)
++            trainer_cls = getattr(module, class_name)
++
++        except Exception as e:
++            raise RuntimeError(f"Failed to load trainer class from '{custom_class_path}': {e}") from e
++
++        # Verify that the custom trainer class inherits from RayPPOTrainer
++        if not issubclass(trainer_cls, RayPPOTrainer):
++            raise TypeError(f"The custom trainer class '{class_name}' from '{custom_class_path}' must inherit from RayPPOTrainer")
++
++        print(f"Using custom trainer class: {trainer_cls.__name__}")
++    else:
++        # Use the default RayPPOTrainer class if no custom class is specified
++        trainer_cls = RayPPOTrainer
++        print(f"Using default trainer class: {trainer_cls.__name__}")
++
++    return trainer_cls
++
++
+ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
+     """Create a dataset.
+ 
+diff --git a/verl/trainer/ppo/reward.py b/verl/trainer/ppo/reward.py
+index 08143f24..5495e39e 100644
+--- a/verl/trainer/ppo/reward.py
++++ b/verl/trainer/ppo/reward.py
+@@ -71,17 +71,42 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
+         An instance of the specified reward manager class.
+     """
+     from verl.workers.reward_manager import get_reward_manager_cls
+-
+-    # The list of pre-defined reward managers are defined in `verl/workers/reward_manager/`:
+-    # naive: NaiveRewardManager
+-    # prime: PrimeRewardManager
+-    # batch: BatchRewardManager
+-    # dapo: DAPORewardManager
+-    # Note(haibin.lin): For custom reward managers, please make sure they are imported and
+-    # registered via `verl.workers.reward_manager.register`
+-    # By default reward_manager is set to naive (NaiveRewardManager)
+-    reward_manager_name = config.reward_model.get("reward_manager", "naive")
+-    reward_manager_cls = get_reward_manager_cls(reward_manager_name)
++    import importlib
++
++    # Check if a custom reward manager class path is provided in reward_kwargs
++    reward_manager_class_path = reward_kwargs.pop("reward_manager_class_path", None)
++
++    if reward_manager_class_path:
++        # Load reward manager class from the provided path
++        print(f"Loading custom reward manager from class path: {reward_manager_class_path}")
++
++        try:
++            # Split module path and class name
++            if ":" in reward_manager_class_path:
++                module_path, class_name = reward_manager_class_path.split(":", 1)
++            else:
++                # Assume the class name is the last part after the last dot
++                parts = reward_manager_class_path.split(".")
++                module_path = ".".join(parts[:-1])
++                class_name = parts[-1]
++
++            # Import the module and get the class
++            module = importlib.import_module(module_path)
++            reward_manager_cls = getattr(module, class_name)
++
++        except Exception as e:
++            raise RuntimeError(f"Failed to load reward manager class from '{reward_manager_class_path}': {e}") from e
++    else:
++        # The list of pre-defined reward managers are defined in `verl/workers/reward_manager/`:
++        # naive: NaiveRewardManager
++        # prime: PrimeRewardManager
++        # batch: BatchRewardManager
++        # dapo: DAPORewardManager
++        # Note(haibin.lin): For custom reward managers, please make sure they are imported and
++        # registered via `verl.workers.reward_manager.register`
++        # By default reward_manager is set to naive (NaiveRewardManager)
++        reward_manager_name = config.reward_model.get("reward_manager", "naive")
++        reward_manager_cls = get_reward_manager_cls(reward_manager_name)
+ 
+     # Try to get a custom reward function based on the configuration
+     compute_score = get_custom_reward_fn(config)
+diff --git a/verl/workers/rollout/async_server.py b/verl/workers/rollout/async_server.py
+index 8a836c37..a0af735a 100644
+--- a/verl/workers/rollout/async_server.py
++++ b/verl/workers/rollout/async_server.py
+@@ -12,13 +12,14 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ import asyncio
++import importlib
+ import logging
+ import os
+ import socket
+ import threading
+ from abc import ABC, abstractmethod
+ from contextlib import asynccontextmanager
+-from typing import Any, Dict, List, Tuple, Type
++from typing import Any, Dict, List, Optional, Tuple, Type
+ 
+ import fastapi
+ import ray
+@@ -39,6 +40,52 @@ def _get_free_port():
+         return sock.getsockname()[1]
+ 
+ 
++def _create_chat_scheduler(config: DictConfig, server_addresses: List[str]):
++    """Create chat scheduler instance based on configuration.
++
++    Args:
++        config: DictConfig, full configuration.
++        server_addresses: List[str], server addresses.
++
++    Returns:
++        ChatCompletionScheduler: chat scheduler instance.
++    """
++    # Check if custom chat scheduler is specified in config
++    multi_turn_config = config.get("actor_rollout_ref", {}).get("rollout", {}).get("multi_turn", {})
++    custom_scheduler_class = multi_turn_config.get("chat_scheduler_class_name")
++
++    print(f"[DEBUG] multi_turn_config: {multi_turn_config}")
++    print(f"[DEBUG] custom_scheduler_class: {custom_scheduler_class}")
++
++    if custom_scheduler_class:
++        # Dynamic import and instantiation of custom scheduler
++        try:
++            module_name, class_name = custom_scheduler_class.rsplit('.', 1)
++            print(f"[DEBUG] Attempting to import {module_name}.{class_name}")
++
++            module = importlib.import_module(module_name)
++            scheduler_class = getattr(module, class_name)
++
++            print(f"[DEBUG] Loading custom chat scheduler from {module_name}.{class_name}")
++            logger.info(f"Loading custom chat scheduler from {module_name}.{class_name}")
++            return scheduler_class(
++                config=config,
++                server_addresses=server_addresses,
++            )
++        except Exception as e:
++            print(f"[DEBUG] Failed to create custom chat scheduler {custom_scheduler_class}: {e}")
++            logger.error(f"Failed to create custom chat scheduler {custom_scheduler_class}: {e}")
++            logger.info("Falling back to default ChatCompletionScheduler")
++
++    # Use default scheduler
++    print(f"[DEBUG] Using default ChatCompletionScheduler")
++    logger.info("Using default ChatCompletionScheduler")
++    return ChatCompletionScheduler(
++        config=config,
++        server_addresses=server_addresses,
++    )
++
++
+ class AsyncServerBase(ABC):
+     """Base class for AsyncServer."""
+ 
+@@ -123,6 +170,7 @@ class AsyncLLMServerManager:
+ 
+         server_class = async_server_class(
+             rollout_backend=self.config.rollout.name,
++            config=self.full_config,
+         )
+ 
+         # Start all server instances, restart if address already in use.
+@@ -167,7 +215,7 @@ class AsyncLLMServerManager:
+         asyncio.set_event_loop(self.chat_scheduler_loop)
+ 
+         try:
+-            self.chat_scheduler = ChatCompletionScheduler(
++            self.chat_scheduler = _create_chat_scheduler(
+                 config=self.full_config,
+                 server_addresses=self.server_addresses,
+             )
+@@ -214,16 +262,38 @@ class AsyncLLMServerManager:
+         future = asyncio.run_coroutine_threadsafe(self.chat_scheduler.generate_sequences(prompts, **sampling_params), self.chat_scheduler_loop)
+         return future.result()
+ 
+-
+-def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
++# def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
++def async_server_class(rollout_backend: str, config: Optional[DictConfig] = None) -> Type[AsyncServerBase]:
+     """Get async server class.
+ 
+     Args:
+         rollout_backend: str, rollout backend, should be "vllm" or "sglang".
++        config: Optional[DictConfig], full configuration. If provided, will check for custom server class.
+ 
+     Returns:
+         Type[AsyncServerBase]: async server class.
+     """
++    # Check if custom async server class is specified in config
++    if config is not None:
++        multi_turn_config = config.get("actor_rollout_ref", {}).get("rollout", {}).get("multi_turn", {})
++        custom_server_class = multi_turn_config.get("async_server_class_name")
++
++        if custom_server_class:
++            # Dynamic import and instantiation of custom server class
++            try:
++                module_name, class_name = custom_server_class.rsplit('.', 1)
++                module = importlib.import_module(module_name)
++                server_class = getattr(module, class_name)
++
++                print(f"[DEBUG] Loading custom async server class from {module_name}.{class_name}")
++                logger.info(f"Loading custom async server class from {module_name}.{class_name}")
++                return server_class
++            except Exception as e:
++                print(f"[DEBUG] Failed to load custom async server class {custom_server_class}: {e}")
++                logger.error(f"Failed to load custom async server class {custom_server_class}: {e}")
++                logger.info("Falling back to default async server class")
++
++    # Use default server class based on backend
+     if rollout_backend == "vllm":
+         from verl.workers.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServer
+ 

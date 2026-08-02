@@ -1,0 +1,12 @@
+[submodule "natural-questions"]
+	path = natural-questions
+	url = https://github.com/google-research-datasets/natural-questions.git
+	shallow = true
+[submodule "OpenJudge"]
+	path = OpenJudge
+	url = https://github.com/agentscope-ai/OpenJudge.git
+	shallow = true
+[submodule "verl"]
+	path = verl
+	url = https://github.com/verl-project/verl.git
+	shallow = true

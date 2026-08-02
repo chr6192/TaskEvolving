@@ -32,8 +32,8 @@ git submodule update --init --recursive --depth 1
 初始化 submodule 后，在主仓库根目录执行：
 
 ```bash
-git -C verl apply --check ../patches/verl/task-evolving-customizations.patch
-git -C verl apply ../patches/verl/task-evolving-customizations.patch
+git -C verl apply --ignore-space-change --check ../patches/verl/task-evolving-customizations.patch
+git -C verl apply --ignore-space-change ../patches/verl/task-evolving-customizations.patch
 ```
 
 应用补丁后，`verl` submodule 会显示为包含未提交修改（dirty）——这是预期状态，无需在 submodule 内部提交这些改动。
@@ -61,16 +61,16 @@ git commit -m "chore: bump OpenJudge to <new-tag>"
 PATCH=patches/verl/task-evolving-customizations.patch
 
 # 1. 确认补丁已应用，并逆向移除（使 verl 回到锁定 commit 的干净树）
-git -C verl apply --reverse --check "../${PATCH}"
-git -C verl apply --reverse "../${PATCH}"
+git -C verl apply --ignore-space-change --reverse --check "../${PATCH}"
+git -C verl apply --ignore-space-change --reverse "../${PATCH}"
 
 # 2. 获取并 checkout 新 tag
 git -C verl fetch origin tag <new-tag>
 git -C verl checkout <new-tag>
 
 # 3. 检查补丁是否仍适用于新版本；--check 失败则须先调整补丁，禁止强制 apply
-git -C verl apply --check "../${PATCH}"
-git -C verl apply "../${PATCH}"
+git -C verl apply --ignore-space-change --check "../${PATCH}"
+git -C verl apply --ignore-space-change "../${PATCH}"
 
 # 4. 在主仓库提交新的 gitlink
 git add verl

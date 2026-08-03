@@ -166,7 +166,7 @@ class OaiChatCompletionScheduler(ChatCompletionScheduler):
         self.background_tasks = set()
         
         # 初始化 completion callback
-        multi_turn_config = config.get('multi_turn', {})
+        multi_turn_config = self.config.get('multi_turn', {})
         if multi_turn_config.get('completion_callback') is None:
             # 默认使用DrSynthesisCompletionCallback
             from deep_research.synthesis_v2.core.dr_synthesis_completion_callback import DrSynthesisCompletionCallback
